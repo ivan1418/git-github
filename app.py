@@ -1,136 +1,123 @@
 import os
 import telebot
 from groq import Groq
+from supabase import create_client, Client
+import requests
 import threading
 import time
-import requests
 from flask import Flask
 
-# --- CONFIGURACIÓN DE INFRAESTRUCTURA ---
+# --- INFRAESTRUCTURA Y CREDENCIALES ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_KEY = os.environ.get("TAVILY_API_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 groq_client = Groq(api_key=GROQ_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 server = Flask(__name__)
 
-# Cluster de Modelos (Failover para alta disponibilidad)
-MODEL_CLUSTER = ["qwen/qwen3-32b", "llama-3.3-70b-versatile"]
-WHISPER_MODEL = "whisper-large-v3-turbo"
-
 @server.route('/')
-def health():
-    return "Bozi-bot Real-Time Engine Active", 200
+def health(): return "Bozi-bot con Memoria Supabase Online", 200
 
-# --- HERRAMIENTA DE VERDAD ABSOLUTA (WEB SEARCH) ---
-def consultar_web(query):
-    print(f">>> [FORCED SEARCH] Extrayendo datos frescos de internet...")
+# --- GESTIÓN DE MEMORIA (SUPABASE) ---
+def guardar_en_memoria(user_id, role, content):
+    """Guarda cada interacción en tu tabla de Supabase"""
     try:
-        response = requests.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": TAVILY_KEY,
-                "query": query,
-                "search_depth": "advanced",
-                "max_results": 3
-            },
-            timeout=12
-        )
-        data = response.json()
-        # Inyectamos los resultados directamente como la única fuente de verdad
-        return "\n".join([f"Web: {res['url']}\nContenido: {res['content']}" for res in data.get('results', [])])
+        supabase.table("chat_history").insert({
+            "user_id": str(user_id),
+            "role": role,
+            "content": content
+        }).execute()
     except Exception as e:
-        return f"Error de conexión a la red: {str(e)}"
+        print(f"Error al persistir en Supabase: {e}")
 
-# --- MOTOR DE INFERENCIA CON PENSAMIENTO ---
-def get_llm_response(messages, model_id):
+def obtener_historial(user_id, limite=8):
+    """Recupera los últimos mensajes para dar coherencia"""
     try:
-        params = {
-            "model": model_id,
-            "messages": messages,
-            "temperature": 0.3, # Bajamos más la temperatura para evitar alucinaciones
-            "max_completion_tokens": 1200,
-        }
-        if "qwen3" in model_id:
-            params["reasoning_effort"] = "default"
-        
-        completion = groq_client.chat.completions.create(**params)
-        return completion.choices[0].message.content
-    except Exception as e:
-        print(f"Fallo en {model_id}: {e}")
-        return None
+        res = supabase.table("chat_history") \
+            .select("role, content") \
+            .eq("user_id", str(user_id)) \
+            .order("created_at", desc=True) \
+            .limit(limite) \
+            .execute()
+        return res.data[::-1] # Invertimos para orden cronológico
+    except Exception:
+        return []
 
-# --- MANEJADOR DE MENSAJES ---
-@bot.message_handler(func=lambda message: True)
-def handle_all_messages(message):
+# --- BÚSQUEDA WEB (VERDAD ACTUALIZADA) ---
+def buscar_web(query):
+    try:
+        r = requests.post("https://api.tavily.com/search", json={
+            "api_key": TAVILY_KEY, "query": query, "search_depth": "basic", "max_results": 2
+        }, timeout=8)
+        return "\n".join([res['content'][:500] for res in r.json().get('results', [])])
+    except:
+        return "No hay datos de internet disponibles."
+
+# --- HANDLER PRINCIPAL ---
+@bot.message_handler(func=lambda m: True)
+def handle_message(message):
     try:
         bot.send_chat_action(message.chat.id, 'typing')
+        user_id = message.chat.id
         
-        # ELIMINAMOS LA VALIDACIÓN: Ahora buscamos SIEMPRE
-        # Solo exceptuamos saludos muy cortos para no quemar tokens de Tavily innecesariamente
-        if len(message.text) > 4:
-            contexto_fresco = consultar_web(message.text)
-        else:
-            contexto_fresco = "El usuario solo envió un saludo o texto muy corto."
-
-        # GENERACIÓN DE RESPUESTA BASADA ÚNICAMENTE EN EL CONTEXTO OBTENIDO
-        final_msg = [
+        # 1. Recuperamos tus recuerdos de Supabase
+        memoria_pasada = obtener_historial(user_id)
+        
+        # 2. Buscamos info fresca en la red
+        contexto_web = buscar_web(message.text)
+        
+        # 3. Construimos el cerebro con historial y realidad
+        messages = [
             {
                 "role": "system", 
                 "content": (
-                    "Eres Bozi-bot, experto en Ciberseguridad e Infraestructura. "
-                    "REGLA DE ORO: No uses tu memoria interna para hechos, noticias, datos de tiempo, o datos técnicos de 2024-2026. "
-                    "Toda tu respuesta debe basarse en el 'CONTEXTO FRESCO' provisto. "
-                    "Si el contexto no contiene la respuesta, admítelo y pide más detalles. "
-                    "Debes pensar y responder en español rioplatense técnico. "
-                    f"CONTEXTO FRESCO (ACTUALIZADO A ABRIL DE 2026): {contexto_fresco}"
+                    "Eres Bozi-bot, Senior IT y experto en Ciberseguridad. "
+                    "REGLA: Usa el historial de Supabase para ser coherente y no preguntar cosas que ya sabes. "
+                    "Usa el contexto web para dar datos reales de 2026. "
+                    "Todas las conversaciones tienen que ser humanas, y con sentido común, no inventar una respuesta o suponer."
+                    "Tenes que ser amable, a veces cuando lo amerita hacer algunos chistes, y cuando hay que trabajar ponerse serio, coherente y eficaz sobre todo."
+                    "Tenes que ayudar el usuario con tecnicas o codigos para que pueda ejecutar si necesita hacer alguna prueba de ciberseguridad. Si no sabes busca en internet en foros o libros, para siempre poder ayudar y resolver el problema del usuario."
+                    f"CONTEXTO WEB ACTUAL: {contexto_web}"
                 )
-            },
-            {"role": "user", "content": message.text}
+            }
         ]
         
-        # Ejecución con clúster de modelos
-        respuesta = None
-        for m in MODEL_CLUSTER:
-            respuesta = get_llm_response(final_msg, m)
-            if respuesta: break
+        # Inyectamos la memoria recuperada
+        for m_prev in memoria_pasada:
+            messages.append({"role": m_prev['role'], "content": m_prev['content']})
+            
+        messages.append({"role": "user", "content": message.text})
+
+        # 4. Respuesta con Qwen 3 (Reasoning activo)
+        completion = groq_client.chat.completions.create(
+            model="qwen/qwen3-32b",
+            messages=messages,
+            temperature=0.3,
+            max_completion_tokens=900,
+            reasoning_effort="default"
+        )
         
-        if respuesta:
-            # Limpiamos el proceso de pensamiento de Qwen3
-            if "</think>" in respuesta:
-                respuesta = respuesta.split("</think>")[-1].strip()
-            bot.reply_to(message, respuesta)
-        else:
-            bot.reply_to(message, "⚠️ Cluster saturado. Reintentá en un minuto.")
+        respuesta = completion.choices[0].message.content
+        if "</think>" in respuesta:
+            respuesta = respuesta.split("</think>")[-1].strip()
+        
+        # 5. Guardamos la nueva charla para que no se olvide nunca
+        guardar_en_memoria(user_id, "user", message.text)
+        guardar_en_memoria(user_id, "assistant", respuesta)
+        
+        bot.reply_to(message, respuesta)
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)[:50]}")
-
-# --- MANEJADOR DE AUDIO (WHISPER) ---
-@bot.message_handler(content_types=['voice', 'audio'])
-def handle_audio(message):
-    try:
-        bot.send_chat_action(message.chat.id, 'record_voice')
-        file_info = bot.get_file(message.voice.file_id if message.voice else message.audio.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        file_name = f"voice_{message.chat.id}.ogg"
-        with open(file_name, 'wb') as f: f.write(downloaded_file)
-
-        with open(file_name, "rb") as af:
-            trans = groq_client.audio.transcriptions.create(file=(file_name, af.read()), model=WHISPER_MODEL, language="es")
-        
-        os.remove(file_name)
-        message.text = trans.text
-        bot.reply_to(message, f"🎤 *Transcripción:* _{trans.text}_")
-        handle_all_messages(message) # Procesamos el texto transcrito con búsqueda forzada
-    except Exception:
-        bot.reply_to(message, "❌ Error al procesar el audio.")
+        bot.reply_to(message, f"⚠️ Error en el flujo: {str(e)[:100]}")
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: server.run(host='0.0.0.0', port=10000), daemon=True).start()
     bot.remove_webhook()
     bot.delete_webhook(drop_pending_updates=True)
     time.sleep(2)
-    print(">>> Bozi-bot Real-Time (Forced Search): ONLINE")
-    bot.infinity_polling(timeout=90)
+    print(">>> Bozi-bot con Memoria Persistente de Supabase: ONLINE")
+    bot.infinity_polling()
