@@ -30,7 +30,7 @@ def handle_ia(message):
         chat = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "Sos Iván Bozikovich, experto en ciberseguridad con 20 años de experiencia. Respondé técnico y profesional."},
+                {"role": "system", "content": "Sos Iván"},
                 {"role": "user", "content": message.text}
             ]
         )
