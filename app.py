@@ -5,18 +5,17 @@ import threading
 import time
 from flask import Flask
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN DE INFRAESTRUCTURA ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 
-# Usamos non-threaded para evitar colisiones de memoria en el tier gratuito
 bot = telebot.TeleBot(TOKEN, threaded=False)
 groq_client = Groq(api_key=GROQ_KEY)
 server = Flask(__name__)
 
 @server.route('/')
 def health():
-    return "Bozi-Bot Qwen Engine Active", 200
+    return "Bozi-Bot Qwen Reasoning Active", 200
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -24,55 +23,62 @@ def run_server():
 
 # --- MÓDULO VISUAL ---
 def trigger_image(message, prompt_visual):
+    print(f">>> [ACCION] Generando imagen: {prompt_visual}")
     bot.send_chat_action(message.chat.id, 'upload_photo')
     seed = int(time.time())
     clean_prompt = prompt_visual.replace(' ', '%20').replace('"', '')
     image_url = f"https://image.pollinations.ai/prompt/{clean_prompt}?width=1024&height=1024&nologo=true&seed={seed}"
     try:
         bot.send_photo(message.chat.id, image_url, caption=f"🎨 *Boceto:* {prompt_visual}", parse_mode="Markdown")
-    except Exception:
-        bot.reply_to(message, "❌ Error al generar imagen.")
+    except Exception as e:
+        print(f"Error imagen: {e}")
+        bot.reply_to(message, "❌ No pude procesar el boceto visual.")
 
-# --- MANEJADOR DE INTENCIÓN Y QWEN ---
+# --- MANEJADOR DE INTENCIÓN Y QWEN REASONING ---
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
+    print(f">>> Entrada: {message.text}")
     try:
-        # FASE 1: Ruteo rápido con Llama
-        classification = groq_client.chat.completions.create(
+        # FASE 1: MOTOR QWEN CON RAZONAMIENTO (Basado en el snippet de Groq)
+        # Nota: Usamos el ID de modelo qwen-2.5-32b que es el que soporta razonamiento en Groq
+        completion = groq_client.chat.completions.create(
             model="qwen/qwen3-32b",
-            messages=[{"role": "system", "content": "Responde 'IMG: [desc en ingles]' o 'TXT'. Sin hablar."},
-                      {"role": "user", "content": message.text}]
+            messages=[
+                {"role": "system", "content": "Eres Bozi-bot, experto en Ciberseguridad. Piensa profundamente antes de responder."},
+                {"role": "user", "content": message.text}
+            ],
+            temperature=0.6,
+            max_completion_tokens=4096,
+            top_p=0.95,
+            # reasoning_effort="default", # Habilitar cuando el ID soporte el parámetro nativo
+            stream=False # Lo ponemos en False para facilitar el reply en Telegram
         )
         
-        intent = classification.choices[0].message.content.strip().upper()
-
-        if intent.startswith("IMG:"):
-            trigger_image(message, intent.split("IMG:")[1].strip())
-            return 
-
-        # FASE 2: EL CEREBRO QWEN (Pensamiento profundo)
-        chat = groq_client.chat.completions.create(
-            model="qwen-2.5-32b", # ID OFICIAL EN GROQ
-            messages=[
-                {"role": "system", "content": "Eres Bozi-bot, experto en Ciberseguridad. Antes de responder, piensa y analiza técnicamente y piensa la solución más eficiente."},
-                {"role": "user", "content": message.text}
-            ]
-        )
-        bot.reply_to(message, chat.choices[0].message.content)
+        response_text = completion.choices[0].message.content
+        bot.reply_to(message, response_text)
 
     except Exception as e:
-        print(f">>> Error: {e}")
-        bot.reply_to(message, "⚠️ Error en el motor Qwen.")
+        print(f">>> ERROR: {e}")
+        bot.reply_to(message, "⚠️ El motor Qwen está procesando mucha carga o hay un error de ID.")
 
-# --- EJECUCIÓN CON LIMPIEZA DE CONFLICTOS ---
+# --- EJECUCIÓN CON PROTOCOLO ANTI-CONFLICTO (RESET DE SESIÓN) ---
 if __name__ == "__main__":
+    # Arrancamos Flask para el Health Check de Cron-job.org
     threading.Thread(target=run_server, daemon=True).start()
     
-    print(">>> Bozi-Bot: Solicitando control exclusivo del Token...")
+    print(">>> Bozi-Bot: Iniciando protocolo de limpieza de procesos...")
     
-    # MATAMOS CUALQUIER OTRA INSTANCIA (LOCAL O REMOTA)
-    bot.delete_webhook(drop_pending_updates=True)
-    time.sleep(2) # Espera técnica para que Telegram procese el reset
+    try:
+        # 1. Matamos cualquier Webhook previo
+        bot.remove_webhook()
+        # 2. Limpiamos la cola de mensajes acumulados (esto evita el lag del celular)
+        bot.delete_webhook(drop_pending_updates=True)
+        # 3. Espera de seguridad para que Telegram propague el cierre de sesiones viejas
+        time.sleep(3)
+    except Exception as e:
+        print(f"Error en el reset de Telegram: {e}")
+
+    print(">>> Sesión reclamada exitosamente. Motor Qwen Online.")
     
-    print(">>> Motor Qwen Online.")
+    # Iniciamos el polling con parámetros de resiliencia
     bot.infinity_polling(timeout=60, long_polling_timeout=30)
