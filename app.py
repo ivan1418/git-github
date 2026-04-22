@@ -5,7 +5,8 @@ from supabase import create_client, Client
 import requests
 import threading
 import time
-from datetime import datetime # Crucial para el día real
+from datetime import datetime
+from flask import Flask
 
 # --- CONFIGURACIÓN ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -17,86 +18,79 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 bot = telebot.TeleBot(TOKEN, threaded=False)
 groq_client = Groq(api_key=GROQ_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+app = Flask(__name__)
 
-# Clúster de Failover (Qwen3 -> Llama 3.3)
+# Cluster de Failover
 MODEL_CLUSTER = ["qwen/qwen3-32b", "llama-3.3-70b-versatile"]
 
-# --- FUNCIÓN DE MEMORIA PERSISTENTE (SQL) ---
-def leer_historial_supabase(user_id):
+@app.route('/')
+def health():
+    return "Bozi-bot Alive", 200
+
+# --- LÓGICA DE MEMORIA Y LLM ---
+def leer_historial(user_id):
     try:
-        # Buscamos en tu tabla 'memories' (según tu captura image_6f49aa.png)
-        # Adapté los nombres de columnas a tu SQL
-        res = supabase.table("memories").select("content").eq("project_name", str(user_id)).limit(5).execute()
+        res = supabase.table("memories").select("content").eq("project_name", str(user_id)).order("id", desc=True).limit(5).execute()
         return "\n".join([item['content'] for item in res.data])
-    except:
-        return ""
+    except: return ""
 
-# --- MOTOR DE RESPUESTA BLINDADO ---
-def invocar_cluster(messages):
-    for model_id in MODEL_CLUSTER:
-        try:
-            res = groq_client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                temperature=0.1, # Casi 0 para CERO inventos
-                max_completion_tokens=800,
-                reasoning_effort="default" if "qwen3" in model_id else None
-            )
-            return res.choices[0].message.content
-        except Exception as e:
-            if "rate_limit" in str(e).lower(): continue
-            return None
-    return None
+def pensar_y_responder(user_id, text):
+    fecha_hoy = datetime.now().strftime("%A, %d de %B de 2026")
+    historial = leer_historial(user_id)
+    
+    # Búsqueda obligatoria para evitar datos viejos
+    contexto_web = ""
+    try:
+        r = requests.post("https://api.tavily.com/search", json={
+            "api_key": TAVILY_KEY, "query": text, "max_results": 2
+        }, timeout=8)
+        contexto_web = "\n".join([res['content'][:500] for res in r.json().get('results', [])])
+    except: pass
 
-@bot.message_handler(func=lambda m: True)
-def handle_message(message):
-    bot.send_chat_action(message.chat.id, 'typing')
-    
-    # 1. Fecha Real (Se la inyectamos CADA VEZ)
-    fecha_hoy = datetime.now().strftime("%A, %d de %B de %2026")
-    
-    # 2. Recuperar Memoria del Proyecto
-    memoria_proyecto = leer_historial_supabase(message.chat.id)
-    
-    # 3. Prompt de Rigurosidad Técnica
-    prompt_sistema = (
-        f"Eres Bozi-bot. Hoy es EXACTAMENTE {fecha_hoy}. No inventes otra fecha. "
-        f"Historial del proyecto: {memoria_proyecto}. "
-        "REGLA: Si no sabes algo, usa Tavily. No divagues con poesía ni creatividad. "
-        "Respuesta técnica, en español y basada en evidencia."
-        "Eres Bozi-bot, Senior IT y experto en Ciberseguridad. "
-                    "REGLA: Usa el historial de Supabase para ser coherente y no preguntar cosas que ya sabes. "
-                    "Usa el contexto web para dar datos reales de 2026. "
-                    "Todas las conversaciones tienen que ser humanas, y con sentido común, no inventar una respuesta o suponer."
-                    "Tenes que ser amable, a veces cuando lo amerita hacer algunos chistes, y cuando hay que trabajar ponerse serio, coherente y eficaz sobre todo."
-                    "Tenes que ayudar el usuario con tecnicas o codigos para que pueda ejecutar si necesita hacer alguna prueba de ciberseguridad. Si no sabes busca en internet en foros o libros, para siempre poder ayudar y resolver el problema del usuario."
+    prompt = (
+        f"Eres Bozi-bot. Hoy es {fecha_hoy}. No inventes fechas. "
+        f"Historial: {historial}. Web: {contexto_web}. "
+        "Sé técnico, breve y usa los datos web sobre tu memoria interna."
     )
 
-    messages = [
-        {"role": "system", "content": prompt_sistema},
-        {"role": "user", "content": message.text}
-    ]
-
-    respuesta = invocar_cluster(messages)
-    
-    if respuesta:
-        if "</think>" in respuesta:
-            respuesta = respuesta.split("</think>")[-1].strip()
-        
-        # Guardar en Supabase para coherencia futura
+    for model in MODEL_CLUSTER:
         try:
-            supabase.table("memories").insert({
-                "project_name": str(message.chat.id),
-                "content": f"Usuario: {message.text} | Bot: {respuesta}"
-            }).execute()
-        except: pass
-        
-        bot.reply_to(message, respuesta)
-    else:
-        bot.reply_to(message, "⚠️ Error de conexión con el clúster.")
+            res = groq_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": prompt}, {"role": "user", "content": text}],
+                temperature=0.1
+            )
+            return res.choices[0].message.content
+        except: continue
+    return "⚠️ Cluster saturado."
 
-if __name__ == "__main__":
+@bot.message_handler(func=lambda m: True)
+def main_handler(message):
+    bot.send_chat_action(message.chat.id, 'typing')
+    ans = pensar_y_responder(message.chat.id, message.text)
+    if "</think>" in ans: ans = ans.split("</think>")[-1].strip()
+    
+    # Guardar en Supabase
+    try:
+        supabase.table("memories").insert({"project_name": str(message.chat.id), "content": f"U: {message.text} | B: {ans}"}).execute()
+    except: pass
+    
+    bot.reply_to(message, ans)
+
+# --- BOOTSTRAP DE INFRAESTRUCTURA ---
+def run_bot():
+    print(">>> Reclamando Token de Telegram...")
     bot.remove_webhook()
     bot.delete_webhook(drop_pending_updates=True)
-    time.sleep(2)
-    bot.infinity_polling()
+    time.sleep(3) # Tiempo para que Telegram cierre sesiones viejas
+    print(">>> Bot escuchando.")
+    bot.infinity_polling(timeout=90, long_polling_timeout=30)
+
+if __name__ == "__main__":
+    # Iniciamos el bot en un thread separado
+    threading.Thread(target=run_bot, daemon=True).start()
+    
+    # Iniciamos Flask en el puerto que Render requiere (PORT 10000)
+    # Esto es CRÍTICO para el error "No open ports detected"
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
