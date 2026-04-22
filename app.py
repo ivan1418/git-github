@@ -59,32 +59,16 @@ def trigger_image(message, prompt_visual):
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     try:
-        # FASE 1: CLASIFICACIÓN Y DETECCIÓN DE ACTUALIDAD (Llama 3.3)
-        check = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{
-                "role": "system", 
-                "content": "Analiza la intención: 1. Si pide imagen, responde 'IMG: [prompt]'. 2. Si pide datos de actualidad/noticias/precios de 2024-2026, responde 'BUSCAR: [query]'. 3. Si es charla técnica, responde 'TXT'."
-            }, {"role": "user", "content": message.text}]
-        )
-        
-        intent = check.choices[0].message.content.strip().upper()
-        contexto_web = ""
-
-        if intent.startswith("IMG:"):
-            trigger_image(message, intent.split("IMG:")[1].strip())
-            return
-        
-        if intent.startswith("BUSCAR:"):
-            query_web = intent.split("BUSCAR:")[1].strip()
-            bot.send_chat_action(message.chat.id, 'typing')
-            contexto_web = buscar_en_internet(query_web)
-
         # FASE 2: RESPUESTA FINAL CON QWEN (Cerebro Principal)
         chat = groq_client.chat.completions.create(
             model="qwen/qwen3-32b",
             messages=[
-                {"role": "system", "content": f"Eres Bozi-bot, experto en Ciberseguridad. Datos frescos de internet: {contexto_web}. Usa esta info para responder con precisión técnica."},
+                {"role": "system", "content": (
+                "Eres Bozi-bot, experto en Ciberseguridad. "
+                "REGLA OBLIGATORIA: Debes realizar todo tu proceso de razonamiento y pensamiento internamente EN ESPAÑOL. "
+                "Toda la salida, incluyendo el análisis previo, debe ser en español latinoamericano/técnico profesional. "
+                "Contexto actual de internet: {contexto_web}."
+            )
                 {"role": "user", "content": message.text}
             ],
             temperature=0.6
