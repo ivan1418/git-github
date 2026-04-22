@@ -24,18 +24,21 @@ def run_server():
 # --- MÓDULO VISUAL ---
 def trigger_image(message, prompt_visual):
     print(f">>> [ACCION] Generando imagen para: {prompt_visual}")
+    # Avisamos en Telegram que estamos cargando la foto
     bot.send_chat_action(message.chat.id, 'upload_photo')
     seed = int(time.time())
     clean_prompt = prompt_visual.replace(' ', '%20').replace('"', '')
     image_url = f"https://image.pollinations.ai/prompt/{clean_prompt}?width=1024&height=1024&nologo=true&seed={seed}"
     
     try:
+        # Enviamos SOLO la foto con su epígrafe
         bot.send_photo(
             message.chat.id, 
             image_url, 
             caption=f"🎨 *Boceto:* {prompt_visual}",
             parse_mode="Markdown"
         )
+        print(">>> Imagen enviada correctamente.")
     except Exception as e:
         print(f">>> Error enviando imagen: {e}")
         bot.reply_to(message, "❌ No pude procesar el boceto.")
@@ -47,38 +50,43 @@ def handle_all_messages(message):
     
     try:
         # FASE 1: CLASIFICACIÓN ULTRA-ESTRICTA
-        # Le pedimos que actúe como una API, no como un chat.
+        # Este prompt es el Firewall. Le prohíbe charlar si detecta imagen.
         classification = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "system", 
                     "content": (
-                        "Eres un motor de clasificación técnica. Tu salida debe ser estrictamente una de estas dos opciones:\n"
-                        "1. Si el usuario quiere una imagen/boceto/dibujo/esquema: responde 'IMG: [descripción en español]'\n"
-                        "2. Si es charla o consulta técnica: responde 'TXT'\n"                        
+                        "Eres un motor de ruteo técnico. Analiza la intención del usuario.\n"
+                        "Regla 1: Si el usuario quiere ver, dibujar, mostrar o generar una imagen/boceto/gráfico, responde EXCLUSIVAMENTE con 'IMG: [descripción en español]'.\n"
+                        "Regla 2: Si es charla o consulta técnica normal, responde 'TXT'.\n"
+                        "Regla 3: Si hace falta dar explicaciones ponelas, saluda y pedí disculpas si es necesario. Pero solo responde el código IMG o TXT cuando estamos haciendo un trabajo."
                     )
                 },
                 {"role": "user", "content": message.text}
             ]
         )
         
+        # Obtenemos la respuesta y la forzamos a mayúsculas para evitar fallas
         intent_res = classification.choices[0].message.content.strip()
         print(f">>> Clasificación: {intent_res}")
 
         if intent_res.upper().startswith("IMG:"):
-            # FASE 2A: DISPARAR IMAGEN
+            # FASE 2A: DISPARAR IMAGEN Y *CORTAR LA EJECUCIÓN* AQUÍ
             visual_desc = intent_res.split("IMG:")[1].strip()
             trigger_image(message, visual_desc)
+            # El return asegura que no se ejecute nada más abajo
+            return 
         
         else:
             # FASE 2B: RESPUESTA TÉCNICA (Bozi)
+            # Solo se ejecuta si la clasificación fue 'TXT'
             chat = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
                     {
                         "role": "system", 
-                        "content": "Eres Bozi"
+                        "content": "Eres Bozi. Responde de forma técnica, profesional y al grano."
                     },
                     {"role": "user", "content": message.text}
                 ]
@@ -87,10 +95,11 @@ def handle_all_messages(message):
 
     except Exception as e:
         print(f">>> Error en el proceso: {e}")
-        bot.reply_to(message, "⚠️ Error técnico en el procesamiento.")
+        bot.reply_to(message, "⚠️ El sistema de IA tuvo un hipo técnico. Intentá de nuevo.")
 
 if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
-    print(">>> Bozi-Bot desplegado. Salud check OK.")
+    print(">>> Bozi-Bot desplegado exitosamente. Salud check OK en puerto 10000.")    
+    # Aseguramos que el bot empiece limpio sin webhooks viejos
     bot.remove_webhook()
     bot.infinity_polling()
