@@ -49,11 +49,11 @@ def handle_all_messages(message):
     try:
         # FASE 1: CLASIFICACIÓN RÁPIDA (Seguimos con Llama para latencia mínima en ruteo)
         classification = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="qwen/qwen3-32b",
             messages=[
                 {
                     "role": "system", 
-                    "content": "Eres un motor de ruteo. Si el usuario pide una imagen o boceto responde 'IMG: [descripción en inglés]'. Si es charla responde 'TXT'. Sin explicaciones."
+                    "content": "Eres un motor de ruteo. Si el usuario pide una imagen o boceto responde 'IMG: [descripción en español]'. Si es charla responde 'TXT'. Sin explicaciones."
                 },
                 {"role": "user", "content": message.text}
             ]
@@ -70,12 +70,12 @@ def handle_all_messages(message):
             # FASE 2: RESPUESTA TÉCNICA CON QWEN
             # Aquí usamos el ID exacto que habilitaste en Groq
             chat = groq_client.chat.completions.create(
-                model="qwen-2.5-32b", # Cambialo por el ID exacto que ves en tu consola de Groq
+                model="qwen/qwen3-32b", # Cambialo por el ID exacto que ves en tu consola de Groq
                 messages=[
                     {
                         "role": "system", 
                         "content": (
-                            "Eres Iván Bozikovich, Senior IT Infrastructure y Cybersecurity Specialist con 20 años de experiencia. "
+                            "Eres Bozi"
                             "Responde con profundidad técnica, profesionalismo y precisión. Piensa paso a paso."
                         )
                     },
