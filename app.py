@@ -45,5 +45,21 @@ if __name__ == "__main__":
     
     # Iniciamos el Bot en el hilo principal
     print(">>> Bot Online y Servidor Health Check listo")
+
+import requests
+import time
+
+def keep_alive():
+    url = "https://git-github-47x8.onrender.com"
+    while True:
+        try:
+            requests.get(url)
+            print(">>> Auto-Ping: Contenedor mantenido despierto")
+        except:
+            print(">>> Auto-Ping: Error al despertar")
+        time.sleep(600) # Cada 5 minutos
+
+# Y en el __main__, lo lanzás como otro hilo:
+# threading.Thread(target=keep_alive).start()
     bot.remove_webhook()
     bot.infinity_polling()
