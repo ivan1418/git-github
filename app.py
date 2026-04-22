@@ -5,7 +5,7 @@ import threading
 import time
 from flask import Flask
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN DE INFRAESTRUCTURA ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 
@@ -15,91 +15,83 @@ server = Flask(__name__)
 
 @server.route('/')
 def health():
-    return "Bozi-Bot AI Intent Gateway Active", 200
+    return "Bozi-Bot Qwen Engine Active", 200
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     server.run(host='0.0.0.0', port=port)
 
-# --- MÓDULO VISUAL ---
+# --- MÓDULO DE GENERACIÓN VISUAL ---
 def trigger_image(message, prompt_visual):
-    print(f">>> [ACCION] Generando imagen para: {prompt_visual}")
-    # Avisamos en Telegram que estamos cargando la foto
+    print(f">>> [ACCION] Generando imagen: {prompt_visual}")
     bot.send_chat_action(message.chat.id, 'upload_photo')
+    
     seed = int(time.time())
     clean_prompt = prompt_visual.replace(' ', '%20').replace('"', '')
     image_url = f"https://image.pollinations.ai/prompt/{clean_prompt}?width=1024&height=1024&nologo=true&seed={seed}"
     
     try:
-        # Enviamos SOLO la foto con su epígrafe
         bot.send_photo(
             message.chat.id, 
             image_url, 
             caption=f"🎨 *Boceto:* {prompt_visual}",
             parse_mode="Markdown"
         )
-        print(">>> Imagen enviada correctamente.")
     except Exception as e:
         print(f">>> Error enviando imagen: {e}")
-        bot.reply_to(message, "❌ No pude procesar el boceto.")
+        bot.reply_to(message, "❌ No pude procesar el boceto visual.")
 
-# --- MANEJADOR DE INTENCIÓN (EL CEREBRO) ---
+# --- MANEJADOR DE INTENCIÓN Y CEREBRO QWEN ---
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
-    print(f">>> Mensaje entrante: {message.text}")
+    print(f">>> Entrada recibida: {message.text}")
     
     try:
-        # FASE 1: CLASIFICACIÓN ULTRA-ESTRICTA
-        # Este prompt es el Firewall. Le prohíbe charlar si detecta imagen.
+        # FASE 1: CLASIFICACIÓN RÁPIDA (Seguimos con Llama para latencia mínima en ruteo)
         classification = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "system", 
-                    "content": (
-                        "Eres un motor de ruteo técnico. Analiza la intención del usuario.\n"
-                        "Regla 1: Si el usuario quiere ver, dibujar, mostrar o generar una imagen/boceto/gráfico, responde EXCLUSIVAMENTE con 'IMG: [descripción en español]'.\n"
-                        "Regla 2: Si es charla o consulta técnica normal, responde 'TXT'.\n"
-                        "Regla 3: Si hace falta dar explicaciones ponelas, saluda y pedí disculpas si es necesario. Pero solo responde el código IMG o TXT cuando estamos haciendo un trabajo."
-                    )
+                    "content": "Eres un motor de ruteo. Si el usuario pide una imagen o boceto responde 'IMG: [descripción en inglés]'. Si es charla responde 'TXT'. Sin explicaciones."
                 },
                 {"role": "user", "content": message.text}
             ]
         )
         
-        # Obtenemos la respuesta y la forzamos a mayúsculas para evitar fallas
-        intent_res = classification.choices[0].message.content.strip()
-        print(f">>> Clasificación: {intent_res}")
+        intent_res = classification.choices[0].message.content.strip().upper()
 
-        if intent_res.upper().startswith("IMG:"):
-            # FASE 2A: DISPARAR IMAGEN Y *CORTAR LA EJECUCIÓN* AQUÍ
+        if intent_res.startswith("IMG:"):
             visual_desc = intent_res.split("IMG:")[1].strip()
             trigger_image(message, visual_desc)
-            # El return asegura que no se ejecute nada más abajo
             return 
         
         else:
-            # FASE 2B: RESPUESTA TÉCNICA (Bozi)
-            # Solo se ejecuta si la clasificación fue 'TXT'
+            # FASE 2: RESPUESTA TÉCNICA CON QWEN
+            # Aquí usamos el ID exacto que habilitaste en Groq
             chat = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="qwen-2.5-32b", # Cambialo por el ID exacto que ves en tu consola de Groq
                 messages=[
                     {
                         "role": "system", 
-                        "content": "Eres Bozi. Responde de forma técnica, profesional y al grano."
+                        "content": (
+                            "Eres Iván Bozikovich, Senior IT Infrastructure y Cybersecurity Specialist con 20 años de experiencia. "
+                            "Responde con profundidad técnica, profesionalismo y precisión. Piensa paso a paso."
+                        )
                     },
                     {"role": "user", "content": message.text}
                 ]
             )
+            
             bot.reply_to(message, chat.choices[0].message.content)
 
     except Exception as e:
-        print(f">>> Error en el proceso: {e}")
-        bot.reply_to(message, "⚠️ El sistema de IA tuvo un hipo técnico. Intentá de nuevo.")
+        print(f">>> ERROR: {e}")
+        bot.reply_to(message, "⚠️ Error técnico al conectar con el modelo Qwen.")
 
 if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
-    print(">>> Bozi-Bot desplegado exitosamente. Salud check OK en puerto 10000.")    
-    # Aseguramos que el bot empiece limpio sin webhooks viejos
-    bot.remove_webhook()
-    bot.infinity_polling()
+    print(">>> Bozi-Bot desplegado con motor Qwen.")    
+    # Limpieza de cola de mensajes para evitar duplicados en el celular
+    bot.delete_webhook(drop_pending_updates=True) 
+    bot.infinity_polling(timeout=60)
