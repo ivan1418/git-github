@@ -59,16 +59,18 @@ def trigger_image(message, prompt_visual):
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     try:
-        # FASE 2: RESPUESTA FINAL CON QWEN (Cerebro Principal)
+        # FASE 1: RESPUESTA FINAL CON QWEN
         chat = groq_client.chat.completions.create(
             model="qwen/qwen3-32b",
             messages=[
-                {"role": "system", "content": (
-                "Eres Bozi-bot, experto en Ciberseguridad. "
-                "REGLA OBLIGATORIA: Debes realizar todo tu proceso de razonamiento y pensamiento internamente EN ESPAÑOL. "
-                "Toda la salida, incluyendo el análisis previo, debe ser en español latinoamericano/técnico profesional. "
-                "Contexto actual de internet: {contexto_web}."
-            )
+                {
+                    "role": "system", 
+                    "content": (
+                        "Eres Bozi-bot, experto en Ciberseguridad, redes, infraestrucutura, etc. "
+                        "REGLA OBLIGATORIA: Debes realizar todo tu proceso de razonamiento y pensamiento internamente EN ESPAÑOL, y responder siempre en español "
+                        f"Contexto actual de internet: {contexto_web}."
+                    )
+                }, # <--- ASEGURATE DE QUE ESTA COMA ESTÉ AQUÍ
                 {"role": "user", "content": message.text}
             ],
             temperature=0.6
