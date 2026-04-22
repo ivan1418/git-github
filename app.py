@@ -6,10 +6,10 @@ import time
 import requests
 from flask import Flask
 
-# --- CONFIGURACIÓN DE INFRAESTRUCTURA ---
+# --- INFRAESTRUCTURA CORE ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
-TAVILY_KEY = os.environ.get("TAVILY_API_KEY") # Nueva Variable
+TAVILY_KEY = os.environ.get("TAVILY_API_KEY")
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 groq_client = Groq(api_key=GROQ_KEY)
@@ -17,15 +17,11 @@ server = Flask(__name__)
 
 @server.route('/')
 def health():
-    return "Bozi-Bot Online - Qwen + Tavily 2026", 200
+    return "Bozi-bot Qwen3 Engine Active", 200
 
-def run_server():
-    port = int(os.environ.get("PORT", 10000))
-    server.run(host='0.0.0.0', port=port)
-
-# --- FUNCIÓN DE BÚSQUEDA WEB (TAVILY) ---
-def buscar_en_internet(query):
-    print(f">>> [WEB SEARCH] Consultando Tavily: {query}")
+# --- HERRAMIENTA DE CONEXIÓN A INTERNET ---
+def consultar_web(query):
+    print(f">>> [AGENTE] Qwen solicitando datos de internet para: {query}")
     try:
         response = requests.post(
             "https://api.tavily.com/search",
@@ -33,62 +29,79 @@ def buscar_en_internet(query):
                 "api_key": TAVILY_KEY,
                 "query": query,
                 "search_depth": "advanced",
-                "max_results": 3
+                "max_results": 5
             }
         )
         data = response.json()
-        # Consolidamos los resultados en un string para el modelo
-        contexto = "\n".join([f"- {res['content']}" for res in data.get('results', [])])
-        return contexto
+        return "\n".join([f"Fuente: {res['url']}\nContenido: {res['content']}" for res in data.get('results', [])])
     except Exception as e:
-        print(f"Error en Tavily: {e}")
-        return "No se pudo obtener información en tiempo real."
+        return f"Error de conexión: {str(e)}"
 
-# --- MÓDULO VISUAL ---
-def trigger_image(message, prompt_visual):
-    bot.send_chat_action(message.chat.id, 'upload_photo')
-    seed = int(time.time())
-    clean_prompt = prompt_visual.replace(' ', '%20').replace('"', '')
-    image_url = f"https://image.pollinations.ai/prompt/{clean_prompt}?width=1024&height=1024&nologo=true&seed={seed}"
-    try:
-        bot.send_photo(message.chat.id, image_url, caption=f"🎨 *Boceto:* {prompt_visual}", parse_mode="Markdown")
-    except:
-        bot.reply_to(message, "❌ Error al generar imagen.")
-
-# --- MANEJADOR DE INTENCIÓN Y RESPUESTA ---
+# --- LÓGICA DE PENSAMIENTO Y RESPUESTA ---
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     try:
-        # FASE 1: RESPUESTA FINAL CON QWEN
-        chat = groq_client.chat.completions.create(
+        bot.send_chat_action(message.chat.id, 'typing')
+        
+        # 1. PASO DE PENSAMIENTO: ¿Necesito internet?
+        # Usamos el modelo Qwen que viste en tu Playground
+        analisis_previo = groq_client.chat.completions.create(
+            model="qwen/qwen3-32b",
+            messages=[
+                {"role": "system", "content": "Eres el módulo de análisis de Bozi-bot. Responde únicamente 'BUSCAR' si necesitas internet para responder con actualidad o 'SABER' si puedes responder con tu conocimiento."},
+                {"role": "user", "content": message.text}
+            ],
+            reasoning_effort="low" # Pensamiento rápido para la decisión
+        )
+        
+        decision = analisis_previo.choices[0].message.content.strip().upper()
+        contexto_web = ""
+        
+        if "BUSCAR" in decision:
+            contexto_web = consultar_web(message.text)
+
+        # 2. RESPUESTA FINAL CON RAZONAMIENTO PROFUNDO
+        # Implementamos los parámetros que viste en la captura de Groq
+        completion = groq_client.chat.completions.create(
             model="qwen/qwen3-32b",
             messages=[
                 {
                     "role": "system", 
                     "content": (
-                        "Eres Bozi-bot, experto en Ciberseguridad, redes, infraestrucutura, etc. "
-                        "REGLA OBLIGATORIA: Debes realizar todo tu proceso de razonamiento y pensamiento internamente EN ESPAÑOL, y responder siempre en español "
-                        f"Contexto actual de internet: {contexto_web}."
+                        "Eres Bozi-bot, experto en Ciberseguridad e Infraestructura IT. "
+                        "DEBES PENSAR Y RESPONDER SIEMPRE EN ESPAÑOL. "
+                        f"CONTEXTO DE INTERNET OBTENIDO: {contexto_web}. "
+                        "Si tienes contexto, úsalo para dar datos reales de hoy. Si no, usa tu lógica técnica."
                     )
-                }, # <--- ASEGURATE DE QUE ESTA COMA ESTÉ AQUÍ
+                },
                 {"role": "user", "content": message.text}
             ],
-            temperature=0.6
+            temperature=0.6,
+            max_completion_tokens=4096,
+            top_p=0.95,
+            reasoning_effort="default", # Forzamos el pensamiento profundo
+            stream=False 
         )
-        bot.reply_to(message, chat.choices[0].message.content)
+        
+        # Limpieza de tags <think> para que no ensucien el chat de Telegram
+        res_final = completion.choices[0].message.content
+        if "</think>" in res_final:
+            res_final = res_final.split("</think>")[-1].strip()
+            
+        bot.reply_to(message, res_final)
 
     except Exception as e:
-        print(f">>> ERROR: {e}")
-        bot.reply_to(message, "⚠️ El motor Qwen tuvo un error de procesamiento.")
+        print(f">>> CRITICAL ERROR: {e}")
+        bot.reply_to(message, f"⚠️ Error en el motor Qwen3: {str(e)}")
 
-# --- INICIO LIMPIO (Protocolo Anti-409) ---
+# --- PROTOCOLO DE ARRANQUE SEGURO (ANTI-409) ---
 if __name__ == "__main__":
-    threading.Thread(target=run_server, daemon=True).start()
+    threading.Thread(target=lambda: server.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
     
-    # Limpieza total para evitar el conflicto de Telegram
+    # Reset de sesión de Telegram
     bot.remove_webhook()
     bot.delete_webhook(drop_pending_updates=True)
-    time.sleep(3)
+    time.sleep(2)
     
-    print(">>> Bozi-Bot Online con Qwen y Conexión a Internet.")
+    print(">>> Bozi-bot operando con Qwen3 y razonando en español.")
     bot.infinity_polling(timeout=90)
