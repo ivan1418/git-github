@@ -5,6 +5,7 @@ import threading
 import time
 from flask import Flask
 
+# --- CONFIGURACIÓN DE INFRAESTRUCTURA ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 
@@ -14,63 +15,89 @@ server = Flask(__name__)
 
 @server.route('/')
 def health():
-    return "Bozi-Bot AI Intent Active", 200
+    return "Bozi-Bot AI Intent Gateway Active", 200
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     server.run(host='0.0.0.0', port=port)
 
-# --- FUNCIÓN PARA GENERAR IMAGEN ---
+# --- MÓDULO DE GENERACIÓN VISUAL ---
 def trigger_image(message, prompt_visual):
+    print(f">>> Iniciando generación de imagen: {prompt_visual}")
     bot.send_chat_action(message.chat.id, 'upload_photo')
+    
     seed = int(time.time())
-    encoded_prompt = prompt_visual.replace(' ', '%20')
-    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed={seed}"
-    try:
-        bot.send_photo(message.chat.id, image_url, caption=f"🎨 Boceto generado: {prompt_visual}")
-    except Exception as e:
-        bot.reply_to(message, "❌ Error al generar el boceto.")
-
-# --- MANEJADOR ÚNICO CON CLASIFICACIÓN DE INTENCIÓN ---
-@bot.message_handler(func=lambda message: True)
-def handle_intent(message):
-    print(f">>> Analizando intención de: {message.text}")
+    # Limpiamos el prompt para URL
+    clean_prompt = prompt_visual.replace(' ', '%20').replace('"', '')
+    image_url = f"https://image.pollinations.ai/prompt/{clean_prompt}?width=1024&height=1024&nologo=true&seed={seed}"
     
     try:
-        # Le pedimos a Llama que clasifique el mensaje
+        bot.send_photo(
+            message.chat.id, 
+            image_url, 
+            caption=f"🎨 *Boceto:* {prompt_visual}\n\n_Generado por Bozi-Bot AI_",
+            parse_mode="Markdown"
+        )
+        print(">>> Imagen enviada con éxito.")
+    except Exception as e:
+        print(f">>> ERROR al enviar imagen: {e}")
+        bot.reply_to(message, "❌ No pude procesar el boceto. Probá con una descripción más simple.")
+
+# --- MANEJADOR DE INTENCIÓN (BRAIN) ---
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message):
+    print(f">>> Procesando entrada: {message.text}")
+    
+    try:
+        # FASE 1: CLASIFICACIÓN ESTRICTA
         classification = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "system", 
-                    "content": "Analiza si el usuario pide una imagen, dibujo, boceto o esquema. Responde SOLO con la palabra 'IMAGEN' seguida de una descripción optimizada en inglés para el generador, o 'TEXTO' si es una charla normal. Ejemplo: 'IMAGEN a high tech server rack'"
+                    "content": (
+                        "Eres un clasificador binario. "
+                        "Si el usuario pide ver, dibujar, mostrar o generar una imagen/boceto/gráfico, "
+                        "responde EXCLUSIVAMENTE con la palabra IMAGEN: seguida del prompt en inglés. "
+                        "Si el usuario solo charla o pregunta, responde EXCLUSIVAMENTE con la palabra TEXTO. "
+                        "PROHIBIDO dar explicaciones o saludar."
+                    )
                 },
                 {"role": "user", "content": message.text}
             ]
         )
         
-        response_type = classification.choices[0].message.content.strip()
+        intent_res = classification.choices[0].message.content.strip()
+        print(f">>> Intención detectada: {intent_res}")
 
-        if response_type.startswith("IMAGEN"):
-            # Si Llama dice que es imagen, extraemos la descripción
-            visual_prompt = response_type.replace("IMAGEN", "").strip()
-            trigger_image(message, visual_prompt)
+        if intent_res.upper().startswith("IMAGEN:"):
+            # FASE 2A: GENERACIÓN
+            visual_desc = intent_res.split("IMAGEN:")[1].strip()
+            trigger_image(message, visual_desc)
+        
         else:
-            # Si es charla, respondemos como Iván Bozikovich
+            # FASE 2B: RESPUESTA TÉCNICA (IVÁN)
             chat = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
-                    {"role": "system", "content": "Sos Iván Bozikovich, Senior IT y experto en Ciberseguridad. Respondé técnico."},
+                    {
+                        "role": "system", 
+                        "content": "Sos Iván"
+                    },
                     {"role": "user", "content": message.text}
                 ]
             )
             bot.reply_to(message, chat.choices[0].message.content)
 
     except Exception as e:
-        print(f"Error en clasificación: {e}")
-        bot.reply_to(message, "Hubo un error al procesar tu solicitud.")
+        print(f">>> ERROR GENERAL: {e}")
+        bot.reply_to(message, "⚠️ El sistema de IA tuvo un hipo técnico. Intentá de nuevo.")
 
+# --- INICIO DE SERVICIOS ---
 if __name__ == "__main__":
+    # Arrancamos Flask en hilo separado (Daemon para que muera con el main)
     threading.Thread(target=run_server, daemon=True).start()
+    
+    print(">>> Bozi-Bot desplegado. Salud check OK en puerto 10000.")
     bot.remove_webhook()
     bot.infinity_polling()
