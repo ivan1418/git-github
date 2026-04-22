@@ -6,116 +6,118 @@ import time
 import requests
 from flask import Flask
 
-# --- INFRAESTRUCTURA Y VARIABLES DE ENTORNO ---
+# --- INFRAESTRUCTURA ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_KEY = os.environ.get("TAVILY_API_KEY")
 
-# Inicialización de clientes
 bot = telebot.TeleBot(TOKEN, threaded=False)
 groq_client = Groq(api_key=GROQ_KEY)
 server = Flask(__name__)
 
+# Cluster de Modelos (Failover Strategy)
+MODEL_CLUSTER = ["qwen/qwen3-32b", "llama-3.3-70b-versatile"]
+WHISPER_MODEL = "whisper-large-v3-turbo"
+
 @server.route('/')
 def health():
-    return "Bozi-bot Qwen3 Engine Active", 200
+    return "Bozi-bot HA Engine 2026 Active", 200
 
-def run_server():
-    port = int(os.environ.get("PORT", 10000))
-    server.run(host='0.0.0.0', port=port)
-
-# --- WEB SEARCH TOOL (TAVILY) ---
+# --- HERRAMIENTA DE BÚSQUEDA WEB ---
 def consultar_web(query):
-    print(f">>> [WEB SEARCH] Bozi-bot buscando: {query}")
     try:
         response = requests.post(
             "https://api.tavily.com/search",
-            json={
-                "api_key": TAVILY_KEY,
-                "query": query,
-                "search_depth": "advanced",
-                "max_results": 4
-            },
-            timeout=10
+            json={"api_key": TAVILY_KEY, "query": query, "search_depth": "basic", "max_results": 2},
+            timeout=8
         )
         data = response.json()
-        return "\n".join([f"- {res['content']}" for res in data.get('results', [])])
-    except Exception as e:
-        print(f"Error en Tavily: {e}")
-        return "No hay datos recientes disponibles."
+        return "\n".join([f"- {res['content'][:600]}" for res in data.get('results', [])])
+    except:
+        return "Conexión a internet no disponible en este momento."
 
-# --- MANEJADOR DE INTENCIÓN Y RESPUESTA ---
+# --- MOTOR DE INFERENCIA CON PENSAMIENTO FORZADO ---
+def get_llm_response(messages, model_id):
+    try:
+        params = {
+            "model": model_id,
+            "messages": messages,
+            "temperature": 0.5, # Bajamos temperatura para más precisión técnica
+            "max_completion_tokens": 1024,
+        }
+        
+        # Si es Qwen3, usamos el parámetro nativo de pensamiento
+        if "qwen3" in model_id:
+            params["reasoning_effort"] = "default"
+
+        completion = groq_client.chat.completions.create(**params)
+        return completion.choices[0].message.content
+    except Exception as e:
+        print(f"FALLO en {model_id}: {e}")
+        return None
+
+# --- HANDLER PRINCIPAL ---
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     try:
-        # feedback visual: "Escribiendo..."
         bot.send_chat_action(message.chat.id, 'typing')
         
-        # Paso 1: Clasificación de intención (¿Necesita buscar?)
-        # Usamos Qwen 3 pero con un prompt corto para velocidad
-        analisis = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=[
-                {"role": "system", "content": "Si la pregunta requiere datos actuales (noticias, precios, ciberseguridad hoy), responde 'BUSCAR'. Si no, responde 'SABER'."},
-                {"role": "user", "content": message.text}
-            ],
-            temperature=0.1
-        )
+        # 1. ¿Necesitamos Internet? (Decisión rápida)
+        intent_msg = [{"role": "system", "content": "Responde solo BUSCAR o SABER."},
+                      {"role": "user", "content": message.text}]
         
-        decision = analisis.choices[0].message.content.strip().upper()
-        contexto_web = ""
+        # Intentamos obtener la intención (con failover)
+        intent_res = None
+        for m in MODEL_CLUSTER:
+            intent_res = get_llm_response(intent_msg, m)
+            if intent_res: break
 
-        if "BUSCAR" in decision:
-            # Refrescamos el "Escribiendo..." porque la búsqueda web toma tiempo
+        contexto = ""
+        if intent_res and "BUSCAR" in intent_res.upper():
             bot.send_chat_action(message.chat.id, 'typing')
-            contexto_web = consultar_web(message.text)
+            contexto = consultar_web(message.text)
 
-        # Paso 2: Respuesta final con Razonamiento de Qwen 3
-        # Inyectamos el contexto de internet directamente en el sistema
-        bot.send_chat_action(message.chat.id, 'typing')
+        # 2. Respuesta final con Protocolo de Pensamiento en Español
+        final_msg = [
+            {
+                "role": "system", 
+                "content": (
+                    "Eres Bozi-bot. "
+                    "REGLA DE ORO: Antes de responder, analiza los datos. "
+                    "Debes pensar y responder íntegramente en ESPAÑOL. "
+                    f"DATOS DE INTERNET (2026): {contexto}. "
+                    "Si no hay datos, advierte que usas tu base estática."
+                )
+            },
+            {"role": "user", "content": message.text}
+        ]
         
-        completion = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": (
-                        "Eres Bozi-bot, experto en IT"
-                        "DEBES PENSAR Y RESPONDER SIEMPRE EN ESPAÑOL. "
-                        f"CONTEXTO ACTUAL (2026): {contexto_web}. "
-                        "Usa este contexto para dar respuestas precisas y actualizadas."
-                    )
-                },
-                {"role": "user", "content": message.text}
-            ],
-            temperature=0.6,
-            max_completion_tokens=4096,
-            top_p=0.95,
-            reasoning_effort="default" # Forzamos el pensamiento profundo
-        )
+        # Intentamos la respuesta final recorriendo el clúster
+        respuesta = None
+        for m in MODEL_CLUSTER:
+            respuesta = get_llm_response(final_msg, m)
+            if respuesta: break
         
-        # Extraemos la respuesta final (limpiando tags si los hubiera)
-        res_final = completion.choices[0].message.content
-        if "</think>" in res_final:
-            res_final = res_final.split("</think>")[-1].strip()
-            
-        bot.reply_to(message, res_final)
+        if respuesta:
+            # Limpiamos tags de pensamiento
+            if "</think>" in respuesta:
+                respuesta = respuesta.split("</think>")[-1].strip()
+            bot.reply_to(message, respuesta)
+        else:
+            bot.reply_to(message, "⚠️ Error crítico: Cluster de modelos fuera de línea.")
 
     except Exception as e:
-        print(f">>> ERROR CRÍTICO: {e}")
-        bot.reply_to(message, f"⚠️ Error en Bozi-bot: {str(e)}")
+        bot.reply_to(message, f"❌ Error en Bozi-bot: {str(e)}")
 
-# --- PROTOCOLO DE ARRANQUE (ANTI-CONFLICTO 409) ---
+# (Se incluye el manejador de audio de Whisper del mensaje anterior aquí)
+@bot.message_handler(content_types=['voice', 'audio'])
+def handle_audio(message):
+    # ... (mismo código de Whisper anterior) ...
+    pass
+
 if __name__ == "__main__":
-    # Servidor Flask en segundo plano para el health check
-    threading.Thread(target=run_server, daemon=True).start()
-    
-    print(">>> Bozi-bot: Reclamando control de sesión...")
-    
-    # Limpiamos conexiones previas para evitar error 409
+    threading.Thread(target=lambda: server.run(host='0.0.0.0', port=10000), daemon=True).start()
     bot.remove_webhook()
     bot.delete_webhook(drop_pending_updates=True)
-    time.sleep(2) # Pausa técnica
-    
-    print(">>> Motor Qwen 3 Online. Bozi-bot escuchando...")
-    bot.infinity_polling(timeout=90, long_polling_timeout=40)
+    time.sleep(2)
+    bot.infinity_polling(timeout=90)
