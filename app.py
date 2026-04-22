@@ -84,7 +84,7 @@ def handle_all_messages(message):
         chat = groq_client.chat.completions.create(
             model="qwen/qwen3-32b",
             messages=[
-                {"role": "system", "content": f"Eres Bozi-bot, experto en Ciberseguridad. Hoy es 22 de abril de 2026. Datos frescos de internet: {contexto_web}. Usa esta info para responder con precisión técnica."},
+                {"role": "system", "content": f"Eres Bozi-bot, experto en Ciberseguridad. Datos frescos de internet: {contexto_web}. Usa esta info para responder con precisión técnica."},
                 {"role": "user", "content": message.text}
             ],
             temperature=0.6
