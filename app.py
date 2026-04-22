@@ -46,6 +46,21 @@ if __name__ == "__main__":
     # Iniciamos el Bot en el hilo principal
     print(">>> Bot Online y Servidor Health Check listo")
 
+@bot.message_handler(commands=['img'])
+def generate_image(message):
+    prompt = message.text.replace("/img ", "")
+    if not prompt:
+        bot.reply_to(message, "Decime qué querés dibujar. Ej: /img diagrama de red ciberseguridad")
+        return
+    
+    # Pollinations genera la imagen basada en esta URL estructurada
+    image_url = f"https://image.pollinations.ai/prompt/{prompt.replace(' ', '%20')}?width=1024&height=1024&nologo=true"
+    
+    try:
+        bot.send_photo(message.chat.id, image_url, caption=f"Aquí tenés el boceto para: {prompt}")
+    except Exception as e:
+        bot.reply_to(message, "No pude generar la imagen en este momento.")
+
 import requests
 import time
 
