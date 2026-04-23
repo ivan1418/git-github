@@ -16,7 +16,7 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
 # Modelo de embeddings de 384 dimensiones (liviano para la RAM de Render)
-model_emb = SentenceTransformer('all-MiniLM-L6-v2') 
+model_emb = SentenceTransformer('paraphrase-albert-small-v2') 
 
 # --- DEFINICIÓN DEL SYSTEM PROMPT ---
 SYSTEM_PROMPT = (
