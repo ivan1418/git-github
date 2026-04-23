@@ -11,7 +11,7 @@ from tavily import TavilyClient
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # Inicialización de Clientes (Variables de entorno en Render)
-supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 model_emb = SentenceTransformer('all-MiniLM-L6-v2') # Modelo liviano de 384 dim
