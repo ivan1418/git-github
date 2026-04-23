@@ -1,127 +1,92 @@
 import os
-import telebot
+import logging
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from supabase import create_client
+from sentence_transformers import SentenceTransformer
 from groq import Groq
-from supabase import create_client, Client
-import requests
-import threading
-import time
-from datetime import datetime
-from flask import Flask
+from tavily import TavilyClient
 
-# --- CONFIGURACIÓN DE INFRAESTRUCTURA ---
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GROQ_KEY = os.environ.get("GROQ_API_KEY")
-TAVILY_KEY = os.environ.get("TAVILY_API_KEY")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+# 1. Configuración de Logs e Infraestructura
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-bot = telebot.TeleBot(TOKEN, threaded=False)
-groq_client = Groq(api_key=GROQ_KEY)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-app = Flask(__name__)
+# Inicialización de Clientes (Variables de entorno en Render)
+supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+model_emb = SentenceTransformer('all-MiniLM-L6-v2') # Modelo liviano de 384 dim
 
-@app.route('/')
-def health(): return "Bozi-bot Engine Online", 200
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_text = update.message.text
 
-# --- HERRAMIENTA DE BÚSQUEDA (EL SENSOR EXTERNO) ---
-def buscar_en_internet(query):
-    print(f">>> [WEB] Buscando datos reales para: {query}")
+    # --- PASO 1: MEMORIA Y EMBEDDING ---
+    # Generamos el vector para la memoria inteligente
+    vector = model_emb.encode(user_text).tolist()
+    
+    # Guardamos el mensaje del usuario en la nueva tabla bot_memory
+    supabase.table("bot_memory").insert({
+        "chat_id": chat_id,
+        "role": "user",
+        "content": user_text,
+        "embedding": vector
+    }).execute()
+
+    # --- PASO 2: BÚSQUEDA TAVILY (ACTUALIZACIÓN) ---
+    # Buscamos en internet para que el bot no esté desactualizado
     try:
-        r = requests.post("https://api.tavily.com/search", json={
-            "api_key": TAVILY_KEY, 
-            "query": query, 
-            "search_depth": "advanced",
-            "max_results": 3
-        }, timeout=10)
-        resultados = r.json().get('results', [])
-        if not resultados: return "No se hallaron resultados recientes en la web."
-        return "\n".join([f"- {res['content']}" for res in resultados])
+        search_result = tavily_client.get_search_context(query=user_text, search_depth="advanced")
+        context_data = f"Información actual de internet: {search_result}"
     except Exception as e:
-        return f"Error de conexión con Tavily: {str(e)}"
+        context_data = "No se pudo obtener datos en tiempo real."
+        logging.error(f"Error en Tavily: {e}")
 
-# --- LÓGICA DE RAZONAMIENTO Y DECISIÓN ---
-def procesar_respuesta_inteligente(user_id, texto_usuario):
-    fecha_actual = datetime.now().strftime("%A %d de %B de %Y")
+    # --- PASO 3: RECUPERAR HISTORIAL (HILO) ---
+    # Traemos los últimos 8 mensajes para mantener el hilo de la charla
+    res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(8).execute()
     
-    # PASO 1: Análisis de Necesidad de Datos (Módulo de Decisión)
-    # Aquí Qwen3 decide si necesita internet. Le prohibimos decir "no tengo internet".
-    decision_prompt = [
-        {"role": "system", "content": "Eres un auditor de actualidad. Tu única función es responder 'BUSCAR' si la pregunta requiere datos de 2024-2026, clima, noticias o hechos fácticos. Responde 'MEMORIA' solo si es una charla casual o lógica pura. NO des explicaciones."},
-        {"role": "user", "content": texto_usuario}
-    ]
+    # Armamos el array de mensajes para la IA
+    messages = [{"role": "system", "content": f"Sos Bozi-bot, un Senior IT Specialist. Usá esta info actual si es necesario: {context_data}"}]
     
-    decision = groq_client.chat.completions.create(
-        model="qwen/qwen3-32b",
-        messages=decision_prompt,
-        temperature=0.1
-    ).choices[0].message.content.strip().upper()
+    # Invertimos el historial para que sea cronológico
+    for m in reversed(res.data):
+        messages.append({"role": m["role"], "content": m["content"]})
 
-    contexto_web = ""
-    if "BUSCAR" in decision:
-        contexto_web = buscar_en_internet(texto_usuario)
-
-    # PASO 2: Recuperar Memoria de Supabase
+    # --- PASO 4: LLAMADA A GROQ CON FALLBACK ---
     try:
-        res_mem = supabase.table("memories").select("content").eq("project_name", str(user_id)).order("id", desc=True).limit(5).execute()
-        historial = "\n".join([m['content'] for m in res_mem.data])
-    except: historial = ""
-
-    # PASO 3: Respuesta Final Basada en Evidencia
-    prompt_final = [
-        {
-            "role": "system", 
-            "content": (
-                f"Eres Bozi-bot, Senior IT Specialist. Hoy es {fecha_actual}. "
-                "INSTRUCCIÓN: Tienes acceso total a Internet a través de Tavily. "
-                f"DATOS DE INTERNET OBTENIDOS: {contexto_web}. "
-                f"HISTORIAL DE PROYECTO: {historial}. "
-                "REGLA: Si recibiste datos de internet, USALOS. No digas que no puedes conectar. "
-                "Si la información web contradice tu memoria interna, la web es la VERDAD."
-            )
-        },
-        {"role": "user", "content": texto_usuario}
-    ]
-
-    # Usamos Llama 3.3 como failover o para ejecución final si Qwen satura tokens
-    try:
-        res = groq_client.chat.completions.create(
+        # Prioridad 1: Llama 3.3 70B (El más inteligente)
+        response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=prompt_final,
-            temperature=0.3
+            messages=messages,
+            temperature=0.7
         )
-        return res.choices[0].message.content
-    except:
-        return "⚠️ Error: Los modelos están saturados. Reintenta en 10 segundos."
+        answer = response.choices[0].message.content
+    except Exception as e:
+        logging.warning(f"Llama falló, intentando Qwen: {e}")
+        # Prioridad 2: Qwen 3 32B (El backup)
+        response = groq_client.chat.completions.create(
+            model="qwen/qwen3-32b",
+            messages=messages,
+            temperature=0.7
+        )
+        answer = response.choices[0].message.content
 
-@bot.message_handler(func=lambda m: True)
-def handle_text(message):
-    bot.send_chat_action(message.chat.id, 'typing')
+    # --- PASO 5: GUARDAR RESPUESTA Y ENVIAR ---
+    # Guardamos lo que dijo la IA para que el hilo siga en el próximo mensaje
+    supabase.table("bot_memory").insert({
+        "chat_id": chat_id,
+        "role": "assistant",
+        "content": answer
+    }).execute()
+
+    await context.bot.send_message(chat_id=chat_id, text=answer)
+
+if __name__ == '__main__':
+    # El token lo saca de las variables de Render
+    application = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
     
-    respuesta = procesar_respuesta_inteligente(message.chat.id, message.text)
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    # Limpieza de tags de razonamiento si aparecen
-    if "</think>" in respuesta:
-        respuesta = respuesta.split("</think>")[-1].strip()
-
-    # Persistencia en Supabase
-    try:
-        supabase.table("memories").insert({
-            "project_name": str(message.chat.id),
-            "content": f"U: {message.text} | B: {respuesta}"
-        }).execute()
-    except: pass
-
-    bot.reply_to(message, respuesta)
-
-# --- BOOTSTRAP ANTI-409 ---
-def run_telebot():
-    bot.remove_webhook()
-    bot.delete_webhook(drop_pending_updates=True)
-    time.sleep(3)
-    print(">>> Bozi-bot reclamó el control del token.")
-    bot.infinity_polling(timeout=90)
-
-if __name__ == "__main__":
-    threading.Thread(target=run_telebot, daemon=True).start()
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    # Render usa un puerto dinámico, esto es para que no se duerma con cron-job.org
+    port = int(os.environ.get('PORT', 10000))
+    application.run_polling()
