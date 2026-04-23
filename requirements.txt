@@ -1,4 +1,5 @@
-pyTelegramBotAPI
-groq
+python-telegram-bot
 supabase
-flask
+sentence-transformers
+groq
+tavily-python
