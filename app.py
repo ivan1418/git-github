@@ -1,9 +1,9 @@
 import os
 import logging
+import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from supabase import create_client
-from sentence_transformers import SentenceTransformer
 from groq import Groq
 from tavily import TavilyClient
 
@@ -15,19 +15,29 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
-# Modelo de embeddings de 384 dimensiones (liviano para la RAM de Render)
-model_emb = SentenceTransformer('paraphrase-albert-small-v2') 
+# Función para generar embeddings vía API (Evita el error de memoria RAM en Render)
+def get_embedding(text):
+    model_id = "sentence-transformers/all-MiniLM-L6-v2"
+    api_url = f"https://api-inference.huggingface.co/models/{model_id}"
+    # Usamos el token de Hugging Face si existe, sino va sin auth (con límites)
+    headers = {"Authorization": f"Bearer {os.getenv('HF_TOKEN', '')}"}
+    try:
+        response = requests.post(api_url, headers=headers, json={"inputs": text}, timeout=10)
+        return response.json()
+    except Exception as e:
+        logging.error(f"Error al obtener embedding: {e}")
+        return None
 
-# --- DEFINICIÓN DEL SYSTEM PROMPT ---
+# --- SYSTEM PROMPT DE BOZI-BOT ---
 SYSTEM_PROMPT = (
     "Actuá como Bozi-bot, un asistente experto en IT Infrastructure y Cybersecurity. "
-    "Tu tono debe ser profesional, amable, divertido y extremadamente eficiente. "
-    "REGLAS CRÍTICAS DE RESPUESTA: "
-    "1. COHERENCIA: Usarás el historial de conversación y datos de internet para ser preciso. "
-    "2. CONCISIÓN: No des introducciones innecesarias. Ve directo al grano. "
-    "3. RAZONAMIENTO: Analizá si la información sigue las mejores prácticas de ciberseguridad. "
-    "4. BREVEDAD: Respondé corto y conciso (máximo 3-4 párrafos). "
-    "5. IDIOMA: Respondé en español rioplatense con términos técnicos en inglés. "
+    "Tu tono debe ser profesional, amable y extremadamente eficiente. "
+    "REGLAS CRÍTICAS: "
+    "1. COHERENCIA: Usá el historial y datos de internet para ser preciso. "
+    "2. CONCISIÓN: Sin intros largas. Directo al grano. "
+    "3. RAZONAMIENTO: Analizá si la info sigue las mejores prácticas de seguridad. "
+    "4. BREVEDAD: Máximo 3 párrafos. "
+    "5. IDIOMA: Español rioplatense con términos técnicos en inglés. "
     "Si no sabés algo, admitilo."
 )
 
@@ -36,9 +46,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
 
     # --- PASO 1: MEMORIA INTELIGENTE (EMBEDDING) ---
-    vector = model_emb.encode(user_text).tolist()
+    vector = get_embedding(user_text)
     
-    # Guardamos el mensaje del usuario
+    # Guardamos el mensaje del usuario en Supabase
     supabase.table("bot_memory").insert({
         "chat_id": chat_id,
         "role": "user",
@@ -46,17 +56,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "embedding": vector
     }).execute()
 
-    # --- PASO 2: ACTUALIZACIÓN (TAVILY SEARCH) ---
+    # --- PASO 2: ACTUALIZACIÓN (TAVILY) ---
     try:
-        # Buscamos en internet para tener datos frescos de 2026
         search_result = tavily_client.get_search_context(query=user_text, search_depth="advanced")
-        context_data = f"Información actual de internet (contexto): {search_result}"
+        context_data = f"Información actual de internet (2026): {search_result}"
     except Exception as e:
-        context_data = "No se pudo obtener datos en tiempo real de internet."
+        context_data = "No se pudo obtener datos en tiempo real."
         logging.error(f"Error en Tavily: {e}")
 
-    # --- PASO 3: CONSTRUIR MENSAJES PARA LA IA ---
-    # Recuperamos los últimos 8 mensajes de Supabase para el hilo
+    # --- PASO 3: HISTORIAL DE CONVERSACIÓN ---
+    # Traemos los últimos 8 mensajes para mantener el hilo
     res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(8).execute()
     
     messages = [
@@ -64,56 +73,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         {"role": "system", "content": context_data}
     ]
     
-    # Invertimos el historial para que sea cronológico
     for m in reversed(res.data):
         messages.append({"role": m["role"], "content": m["content"]})
 
-    # --- PASO 4: EJECUCIÓN CON FALLBACK (LLAMA -> QWEN) ---
+    # --- PASO 4: LLAMADA A GROQ CON FALLBACK ---
     answer = ""
     try:
         # Prioridad: Llama 3.3 70B
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            temperature=0.6 # Un poco más bajo para mayor coherencia
-        )
+        response = groq_client.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages)
         answer = response.choices[0].message.content
-    except Exception as e:
-        logging.warning(f"Llama falló o límite excedido, intentando Qwen: {e}")
+    except Exception:
+        # Backup: Qwen 3 32B
         try:
-            # Backup: Qwen 3 32B
-            response = groq_client.chat.completions.create(
-                model="qwen/qwen3-32b",
-                messages=messages,
-                temperature=0.6
-            )
+            response = groq_client.chat.completions.create(model="qwen/qwen3-32b", messages=messages)
             answer = response.choices[0].message.content
-        except Exception as e2:
-            answer = "Perdón Iván, tuve un problema técnico con los modelos de IA. Intentá de nuevo en un minuto."
-            logging.error(f"Ambos modelos fallaron: {e2}")
+        except Exception:
+            answer = "Iván, tengo un problema de conexión con mis modelos de IA. Probá en un ratito."
 
     # --- PASO 5: PERSISTENCIA Y RESPUESTA ---
     if answer:
-        # Guardamos la respuesta del asistente para la próxima vuelta
         supabase.table("bot_memory").insert({
             "chat_id": chat_id,
             "role": "assistant",
             "content": answer
         }).execute()
 
-        await context.bot.send_message(chat_id=chat_id, text=answer)
+        await update.message.reply_text(answer)
 
 if __name__ == '__main__':
-    # Asegurate de tener TELEGRAM_TOKEN en Render
     token = os.getenv("TELEGRAM_TOKEN")
-    if not token:
-        raise ValueError("No se encontró TELEGRAM_TOKEN en las variables de entorno.")
-
     application = ApplicationBuilder().token(token).build()
     
-    # Handler para mensajes de texto
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    # Render asigna un puerto automáticamente en la variable PORT
-    logging.info("Bozi-bot online en la nube...")
+    logging.info("Bozi-bot online...")
     application.run_polling()
