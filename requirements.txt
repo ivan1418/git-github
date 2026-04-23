@@ -1,5 +1,5 @@
-python-telegram-bot==20.8
+python-telegram-bot==20.7
 supabase==2.4.0
-sentence-transformers==2.5.1
-groq==0.5.0
-tavily-python==0.3.3
+groq
+tavily-python
+requests
