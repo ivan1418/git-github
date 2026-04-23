@@ -1,5 +1,6 @@
 python-telegram-bot==20.7
-supabase==2.4.0
+supabase==2.3.7
+httpx==0.25.2
 groq
 tavily-python
 requests
