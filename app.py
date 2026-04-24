@@ -5,12 +5,13 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from supabase import create_client
 from groq import Groq
 from tavily import TavilyClient
 
-# --- 1. SERVIDOR DE SALUD (Fix para Render Timed Out) ---
+# --- 1. SERVIDOR DE SALUD (Optimizado para Render) ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -18,8 +19,12 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bozi-bot is online and kicking!")
 
+    def do_HEAD(self):
+        # El "ajuste fino" para que Render no tire 501 al escanear el puerto
+        self.send_response(200)
+        self.end_headers()
+
 def run_health_check():
-    # Usa el puerto 10000 configurado en tus variables de Render
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     logging.info(f"Health check server activo en puerto {port}")
@@ -28,12 +33,10 @@ def run_health_check():
 # --- 2. CONFIGURACIÓN INICIAL ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Clientes de API
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
-# Función de Embeddings (Usa Hugging Face para no agotar la RAM de Render)
 def get_embedding(text):
     model_id = "sentence-transformers/all-MiniLM-L6-v2"
     api_url = f"https://api-inference.huggingface.co/models/{model_id}"
@@ -66,23 +69,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text
     
+    # >> ESTADO: "Escribiendo..." (UX mejorada)
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    
     # Generar vector y guardar en Supabase
     vector = get_embedding(user_text)
     supabase.table("bot_memory").insert({
         "chat_id": chat_id, "role": "user", "content": user_text, "embedding": vector
     }).execute()
     
-    # Buscar contexto actual en internet con Tavily
+    # Buscar contexto actual con Tavily
     try:
         search_res = tavily_client.search(query=user_text, max_results=2)
         context_data = f"Contexto internet actual (2026): {search_res['results']}"
     except:
         context_data = "No se pudo obtener información reciente de internet."
 
-    # Recuperar historial de Supabase (últimos 6 mensajes)
+    # Recuperar historial
     res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(6).execute()
     
-    # Armar lista de mensajes para Groq
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": context_data}
@@ -90,7 +95,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for m in reversed(res.data):
         messages.append({"role": m["role"], "content": m["content"]})
 
-    # Inferencia con IA (Llama 3.3 en Groq)
+    # Inferencia con IA
     try:
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -102,7 +107,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Error en Groq: {e}")
         answer = "Che Iván, se me tildó el rack de la IA. Bancame un toque y volvé a probar."
 
-    # Guardar respuesta y enviar a Telegram
+    # Guardar respuesta y enviar
     supabase.table("bot_memory").insert({
         "chat_id": chat_id, "role": "assistant", "content": answer
     }).execute()
@@ -122,5 +127,5 @@ if __name__ == '__main__':
     
     logging.info("Bozi-bot listo para la acción...")
     
-    # drop_pending_updates=True mata el error 409 Conflict al reiniciar
+    # drop_pending_updates=True mata el error 409 Conflict y limpia la cola al arrancar
     application.run_polling(drop_pending_updates=True)
