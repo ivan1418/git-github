@@ -10,22 +10,21 @@ from supabase import create_client
 from groq import Groq
 from tavily import TavilyClient
 
-# --- 1. SERVIDOR DE SALUD PARA RENDER ---
+# --- 1. HEALTH CHECK SERVER (Evita el Timed Out en Render) ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"Bozi-bot is alive")
+        self.wfile.write(b"Bozi-bot is online and kicking!")
 
-def run_health_check_server():
-    # Usa el puerto 10000 que tenés configurado
+def run_health_check():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    logging.info(f"Servidor de salud escuchando en el puerto {port}")
+    logging.info(f"Health check escuchando en puerto {port}")
     server.serve_forever()
 
-# --- 2. CONFIGURACIÓN DEL BOT ---
+# --- 2. CONFIGURACIÓN E IA ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
@@ -44,46 +43,57 @@ def get_embedding(text):
         except: continue
     return None
 
-SYSTEM_PROMPT = "Sos Bozi-bot, experto en IT. Respondé corto y conciso en español rioplatense."
+# --- TU SYSTEM PROMPT RECUPERADO ---
+SYSTEM_PROMPT = (
+    "Actuá como Bozi-bot, un asistente experto en IT Infrastructure y Cybersecurity. "
+    "Tu tono debe ser profesional, amable, divertido y extremadamente eficiente. "
+    "REGLAS CRÍTICAS DE RESPUESTA: "
+    "1. COHERENCIA: Usarás el historial de conversación y datos de internet para ser preciso. "
+    "2. CONCISIÓN: No des introducciones innecesarias. Ve directo al grano. "
+    "3. RAZONAMIENTO: Analizá si la información sigue las mejores prácticas de ciberseguridad. "
+    "4. BREVEDAD: Respondé corto y conciso (máximo 3-4 párrafos). "
+    "5. IDIOMA: Respondé en español rioplatense con términos técnicos en inglés. "
+    "Si no sabés algo, admitilo."
+)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text
     
-    # Memoria
+    # Memoria y vectores
     vector = get_embedding(user_text)
     supabase.table("bot_memory").insert({"chat_id": chat_id, "role": "user", "content": user_text, "embedding": vector}).execute()
     
-    # Actualidad
+    # Búsqueda en tiempo real
     try:
         search_res = tavily_client.search(query=user_text, max_results=2)
-        context_data = f"Info internet: {search_res['results']}"
-    except: context_data = "No hay datos nuevos."
+        context_data = f"Contexto internet: {search_res['results']}"
+    except: context_data = "No hay data fresca disponible."
 
-    # Historial
+    # Historial para coherencia
     res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(6).execute()
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "system", "content": context_data}]
     for m in reversed(res.data):
         messages.append({"role": m["role"], "content": m["content"]})
 
-    # IA y Respuesta
+    # Inferencia con Groq
     try:
         response = groq_client.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages)
         answer = response.choices[0].message.content
-    except: answer = "Perdón Iván, falló la conexión con la IA."
+    except: answer = "Che Iván, se me cortó el cable de la IA. Bancame un toque y reintentá."
 
+    # Guardar respuesta y enviar
     supabase.table("bot_memory").insert({"chat_id": chat_id, "role": "assistant", "content": answer}).execute()
     await update.message.reply_text(answer)
 
 if __name__ == '__main__':
-    # Arrancamos el servidor de salud en un hilo aparte para que no bloquee al bot
-    threading.Thread(target=run_health_check_server, daemon=True).start()
+    # Lanzamos el server de salud para Render
+    threading.Thread(target=run_health_check, daemon=True).start()
 
-    # Iniciamos Telegram
-    token = os.getenv("TELEGRAM_TOKEN")
-    application = ApplicationBuilder().token(token).build()
+    # Lanzamos el bot de Telegram
+    application = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
     logging.info("Bozi-bot online...")
-    # Limpiamos actualizaciones pendientes para evitar el error 409 Conflict
+    # drop_pending_updates=True mata el error de Conflict (409)
     application.run_polling(drop_pending_updates=True)
