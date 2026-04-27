@@ -66,17 +66,49 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 
-# --- 3. PROMPT BARATO Y DIRECTO ---
-SYSTEM_PROMPT = """
-Sos Bozi-bot, asistente experto en IT Infrastructure, Cybersecurity, Linux, redes, scripting y soporte técnico.
+# --- 3. CARGA DE PROMPTS DESDE ARCHIVOS ---
+def load_prompt_file(filename, fallback=""):
+    try:
+        with open(filename, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        logging.warning(f"No se encontró {filename}. Usando fallback.")
+        return fallback
+    except Exception as e:
+        logging.error(f"Error leyendo {filename}: {e}")
+        return fallback
 
-Respondé en español rioplatense, claro, profesional y directo.
-No hagas introducciones largas.
-Dá pasos concretos cuando sea técnico.
-No inventes datos.
-Si falta información, hacé una suposición razonable y aclarala brevemente.
-Máximo 3 párrafos salvo que el usuario pida código o una guía completa.
-"""
+
+SELF_PROMPT = load_prompt_file(
+    "self.txt",
+    "Sos Bozi-bot, un asistente técnico especializado en IT, Cybersecurity y programación."
+)
+
+KNOWLEDGE_PROMPT = load_prompt_file(
+    "knowledge.txt",
+    "Tenés conocimientos avanzados en redes, sistemas, ciberseguridad, infraestructura y programación."
+)
+
+RULES_PROMPT = load_prompt_file(
+    "rules.txt",
+    "Respondé claro, corto, directo y sin inventar datos."
+)
+
+MEMORY_PROMPT = load_prompt_file(
+    "memory.txt",
+    "Usá solo el historial reciente y priorizá el último mensaje del usuario."
+)
+
+
+SYSTEM_PROMPT = f"""
+{SELF_PROMPT}
+
+{KNOWLEDGE_PROMPT}
+
+{RULES_PROMPT}
+
+{MEMORY_PROMPT}
+""".strip()
 
 
 # --- 4. UTILIDADES DE COSTO ---
@@ -290,6 +322,6 @@ if __name__ == "__main__":
         MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
     )
 
-    logging.info("Bozi-bot optimizado con OpenAI listo.")
+    logging.info("Bozi-bot optimizado con OpenAI y prompts externos listo.")
 
     application.run_polling(drop_pending_updates=True)
