@@ -1,7 +1,5 @@
 import os
 import logging
-import requests
-import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -20,7 +18,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bozi-bot is online and optimized!")
+        self.wfile.write(b"Bozi-bot is online with semantic memory!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -47,9 +45,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "4"))
+MAX_MEMORY_RESULTS = int(os.getenv("MAX_MEMORY_RESULTS", "6"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "450"))
-USE_EMBEDDINGS = os.getenv("USE_EMBEDDINGS", "false").lower() == "true"
+
+USE_EMBEDDINGS = os.getenv("USE_EMBEDDINGS", "true").lower() == "true"
 USE_WEB_SEARCH = os.getenv("USE_WEB_SEARCH", "smart").lower()
 
 if not TELEGRAM_TOKEN:
@@ -66,7 +68,7 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 
-# --- 3. CARGA DE PROMPTS DESDE ARCHIVOS ---
+# --- 3. CARGA DE PROMPTS EXTERNOS ---
 def load_prompt_file(filename, fallback=""):
     try:
         with open(filename, "r", encoding="utf-8") as f:
@@ -96,9 +98,8 @@ RULES_PROMPT = load_prompt_file(
 
 MEMORY_PROMPT = load_prompt_file(
     "memory.txt",
-    "Usá solo el historial reciente y priorizá el último mensaje del usuario."
+    "Usá el historial reciente y recuerdos relevantes de largo plazo cuando sirvan."
 )
-
 
 SYSTEM_PROMPT = f"""
 {SELF_PROMPT}
@@ -108,10 +109,26 @@ SYSTEM_PROMPT = f"""
 {RULES_PROMPT}
 
 {MEMORY_PROMPT}
+
+REGLA EXTRA:
+Cuando recibas recuerdos antiguos desde Supabase, usalos solo si son relevantes para la consulta actual.
+No menciones que usás Supabase salvo que el usuario lo pregunte.
 """.strip()
 
 
-# --- 4. UTILIDADES DE COSTO ---
+# --- 4. UTILIDADES ---
+def trim_text(text, max_chars=1200):
+    if not text:
+        return ""
+
+    text = str(text).strip()
+
+    if len(text) <= max_chars:
+        return text
+
+    return text[:max_chars] + "..."
+
+
 def should_search_web(text: str) -> bool:
     if USE_WEB_SEARCH == "false":
         return False
@@ -130,64 +147,21 @@ def should_search_web(text: str) -> bool:
     return any(k in text_lower for k in keywords)
 
 
-def get_embedding(text):
+def get_openai_embedding(text):
     if not USE_EMBEDDINGS:
         return None
 
-    model_id = "sentence-transformers/all-MiniLM-L6-v2"
-    api_url = f"https://api-inference.huggingface.co/models/{model_id}"
-    headers = {"Authorization": f"Bearer {os.getenv('HF_TOKEN', '')}"}
-
-    for _ in range(2):
-        try:
-            response = requests.post(
-                api_url,
-                headers=headers,
-                json={"inputs": text[:1000]},
-                timeout=10
-            )
-
-            if response.status_code == 200:
-                return response.json()
-
-            time.sleep(1)
-
-        except Exception as e:
-            logging.error(f"Error generando embedding: {e}")
-            time.sleep(1)
-
-    return None
-
-
-def trim_text(text, max_chars=1200):
-    if not text:
-        return ""
-
-    text = str(text).strip()
-
-    if len(text) <= max_chars:
-        return text
-
-    return text[:max_chars] + "..."
-
-
-def get_recent_history(chat_id):
     try:
-        res = (
-            supabase
-            .table("bot_memory")
-            .select("role, content")
-            .eq("chat_id", chat_id)
-            .order("created_at", desc=True)
-            .limit(MAX_HISTORY_MESSAGES)
-            .execute()
+        response = openai_client.embeddings.create(
+            model=OPENAI_EMBEDDING_MODEL,
+            input=trim_text(text, 6000)
         )
 
-        return list(reversed(res.data or []))
+        return response.data[0].embedding
 
     except Exception as e:
-        logging.error(f"Error recuperando historial: {e}")
-        return []
+        logging.error(f"Error generando embedding con OpenAI: {e}")
+        return None
 
 
 def save_memory(chat_id, role, content, embedding=None):
@@ -195,7 +169,7 @@ def save_memory(chat_id, role, content, embedding=None):
         data = {
             "chat_id": chat_id,
             "role": role,
-            "content": trim_text(content, 3000)
+            "content": trim_text(content, 5000)
         }
 
         if embedding is not None:
@@ -205,6 +179,55 @@ def save_memory(chat_id, role, content, embedding=None):
 
     except Exception as e:
         logging.error(f"Error guardando memoria en Supabase: {e}")
+
+
+def get_recent_history(chat_id):
+    try:
+        res = (
+            supabase
+            .table("bot_memory")
+            .select("role, content, created_at")
+            .eq("chat_id", chat_id)
+            .order("created_at", desc=True)
+            .limit(MAX_HISTORY_MESSAGES)
+            .execute()
+        )
+
+        return list(reversed(res.data or []))
+
+    except Exception as e:
+        logging.error(f"Error recuperando historial reciente: {e}")
+        return []
+
+
+def get_semantic_memories(chat_id, query_embedding):
+    if not USE_EMBEDDINGS or query_embedding is None:
+        return []
+
+    try:
+        res = supabase.rpc(
+            "match_bot_memory",
+            {
+                "query_embedding": query_embedding,
+                "match_chat_id": chat_id,
+                "match_count": MAX_MEMORY_RESULTS
+            }
+        ).execute()
+
+        memories = res.data or []
+
+        filtered = []
+        for item in memories:
+            similarity = item.get("similarity", 0)
+
+            if similarity >= 0.25:
+                filtered.append(item)
+
+        return filtered
+
+    except Exception as e:
+        logging.error(f"Error buscando memoria semántica: {e}")
+        return []
 
 
 def get_web_context(user_text):
@@ -224,6 +247,7 @@ def get_web_context(user_text):
         results = search_res.get("results", [])
 
         compact_results = []
+
         for r in results[:2]:
             compact_results.append({
                 "title": r.get("title", ""),
@@ -238,8 +262,31 @@ def get_web_context(user_text):
         return ""
 
 
-def build_openai_input(user_text, history, web_context):
+def build_openai_input(user_text, history, semantic_memories, web_context):
     messages = []
+
+    memory_context = ""
+
+    if semantic_memories:
+        memory_lines = []
+
+        for m in semantic_memories:
+            role = m.get("role", "unknown")
+            content = trim_text(m.get("content", ""), 900)
+            created_at = m.get("created_at", "")
+            similarity = round(float(m.get("similarity", 0)), 3)
+
+            memory_lines.append(
+                f"- Fecha: {created_at} | Rol: {role} | Similitud: {similarity} | Contenido: {content}"
+            )
+
+        memory_context = "Recuerdos relevantes de conversaciones anteriores:\n" + "\n".join(memory_lines)
+
+    if memory_context:
+        messages.append({
+            "role": "user",
+            "content": memory_context
+        })
 
     for m in history:
         role = m.get("role", "user")
@@ -254,14 +301,14 @@ def build_openai_input(user_text, history, web_context):
                 "content": content
             })
 
-    extra_context = ""
+    final_user_message = user_text
 
     if web_context:
-        extra_context = f"\n\nContexto externo disponible:\n{trim_text(web_context, 1800)}"
+        final_user_message += f"\n\nContexto externo disponible:\n{trim_text(web_context, 1800)}"
 
     messages.append({
         "role": "user",
-        "content": f"{user_text}{extra_context}"
+        "content": final_user_message
     })
 
     return messages
@@ -277,15 +324,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action=ChatAction.TYPING
     )
 
-    vector = get_embedding(user_text)
-    save_memory(chat_id, "user", user_text, vector)
+    user_embedding = get_openai_embedding(user_text)
+
+    save_memory(
+        chat_id=chat_id,
+        role="user",
+        content=user_text,
+        embedding=user_embedding
+    )
 
     history = get_recent_history(chat_id)
+    semantic_memories = get_semantic_memories(chat_id, user_embedding)
     web_context = get_web_context(user_text)
 
     input_messages = build_openai_input(
         user_text=user_text,
         history=history,
+        semantic_memories=semantic_memories,
         web_context=web_context
     )
 
@@ -307,7 +362,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Error en OpenAI: {e}")
         answer = "Che Iván, se me tildó la IA. Revisá logs de Render y probá de nuevo."
 
-    save_memory(chat_id, "assistant", answer)
+    assistant_embedding = get_openai_embedding(answer)
+
+    save_memory(
+        chat_id=chat_id,
+        role="assistant",
+        content=answer,
+        embedding=assistant_embedding
+    )
 
     await update.message.reply_text(answer)
 
@@ -322,6 +384,6 @@ if __name__ == "__main__":
         MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
     )
 
-    logging.info("Bozi-bot optimizado con OpenAI y prompts externos listo.")
+    logging.info("Bozi-bot con OpenAI + memoria semántica listo.")
 
     application.run_polling(drop_pending_updates=True)
