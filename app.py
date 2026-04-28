@@ -228,6 +228,13 @@ def get_project_url(project_id):
         return f"{PUBLIC_BASE_URL}/projects/{project_id}"
     return f"/projects/{project_id}"
 
+def is_task_capability_question(text):
+    t = text.lower()
+    return (
+        ("puedo" in t or "podés" in t or "podes" in t) and
+        ("todos los días" in t or "diario" in t or "tareas" in t or "reporte" in t) and
+        ("mandes" in t or "enviarme" in t or "enviar" in t)
+    )
 
 def send_to_webhook(data):
     if not WEBHOOK_DEBUG_URL:
@@ -645,6 +652,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
+# 🔥 CORRECCIÓN PARA QUE NO DIGA "NO PUEDO"
+if is_task_capability_question(user_text):
+    answer = (
+        "Sí, Iván. Puedo hacerlo.\n\n"
+        "Puedo guardar tareas programadas y enviarte reportes automáticamente por Telegram.\n\n"
+        "Por ejemplo:\n"
+        "“Todos los días a las 9 mandame un reporte de ciberseguridad”."
+    )
+
+    await update.message.reply_text(answer)
+    return
+    
     intent = classify_intent(user_text)
     logging.info(f"Intent detectado: {intent}")
 
