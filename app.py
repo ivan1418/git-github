@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update
@@ -18,7 +19,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bozi-bot is online with semantic memory!")
+        self.wfile.write(b"Bozi-bot is online with semantic memory and webhook output!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -43,6 +44,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+WEBHOOK_DEBUG_URL = os.getenv("WEBHOOK_DEBUG_URL")
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -68,7 +70,7 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 
-# --- 3. CARGA DE PROMPTS EXTERNOS ---
+# --- 3. PROMPTS EXTERNOS ---
 def load_prompt_file(filename, fallback=""):
     try:
         with open(filename, "r", encoding="utf-8") as f:
@@ -127,6 +129,20 @@ def trim_text(text, max_chars=1200):
         return text
 
     return text[:max_chars] + "..."
+
+
+def send_to_webhook(data):
+    if not WEBHOOK_DEBUG_URL:
+        return
+
+    try:
+        requests.post(
+            WEBHOOK_DEBUG_URL,
+            json=data,
+            timeout=5
+        )
+    except Exception as e:
+        logging.error(f"Error enviando a Webhook.site: {e}")
 
 
 def should_search_web(text: str) -> bool:
@@ -265,8 +281,6 @@ def get_web_context(user_text):
 def build_openai_input(user_text, history, semantic_memories, web_context):
     messages = []
 
-    memory_context = ""
-
     if semantic_memories:
         memory_lines = []
 
@@ -280,12 +294,9 @@ def build_openai_input(user_text, history, semantic_memories, web_context):
                 f"- Fecha: {created_at} | Rol: {role} | Similitud: {similarity} | Contenido: {content}"
             )
 
-        memory_context = "Recuerdos relevantes de conversaciones anteriores:\n" + "\n".join(memory_lines)
-
-    if memory_context:
         messages.append({
             "role": "user",
-            "content": memory_context
+            "content": "Recuerdos relevantes de conversaciones anteriores:\n" + "\n".join(memory_lines)
         })
 
     for m in history:
@@ -371,6 +382,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         embedding=assistant_embedding
     )
 
+    send_to_webhook({
+        "type": "bot_project_output",
+        "chat_id": chat_id,
+        "user_message": user_text,
+        "bot_response": answer,
+        "semantic_memories_used": semantic_memories,
+        "web_context_used": web_context,
+        "model": OPENAI_MODEL
+    })
+
     await update.message.reply_text(answer)
 
 
@@ -384,6 +405,6 @@ if __name__ == "__main__":
         MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
     )
 
-    logging.info("Bozi-bot con OpenAI + memoria semántica listo.")
+    logging.info("Bozi-bot con OpenAI + Supabase + Webhook.site listo.")
 
     application.run_polling(drop_pending_updates=True)
