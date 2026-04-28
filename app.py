@@ -15,7 +15,6 @@ from openai import OpenAI
 from tavily import TavilyClient
 
 
-# --- CONFIGURACIÓN ---
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -34,7 +33,7 @@ OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-s
 
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "4"))
 MAX_MEMORY_RESULTS = int(os.getenv("MAX_MEMORY_RESULTS", "6"))
-MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1800"))
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "800"))
 
 USE_EMBEDDINGS = os.getenv("USE_EMBEDDINGS", "true").lower() == "true"
 USE_WEB_SEARCH = os.getenv("USE_WEB_SEARCH", "smart").lower()
@@ -53,7 +52,9 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 
-# --- SERVIDOR WEB PARA RENDERIZAR PROYECTOS ---
+# ---------------------------------------------------
+# SERVIDOR WEB PARA VER PROYECTOS PUBLICADOS
+# ---------------------------------------------------
 class WebHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -63,7 +64,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-type", "text/plain; charset=utf-8")
             self.end_headers()
-            self.wfile.write(b"Bozi-bot online. Usa /projects/{id} para ver proyectos.")
+            self.wfile.write(b"Bozi-bot online. Usa /projects/{id} para ver proyectos publicados.")
             return
 
         match = re.match(r"^/projects/(\d+)$", path)
@@ -79,39 +80,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 self.wfile.write(b"Proyecto no encontrado.")
                 return
 
-            html = project.get("html_content") or ""
-
-            if not html:
-                content = project.get("content", "")
-                html = f"""
-                <!DOCTYPE html>
-                <html lang="es">
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>{project.get("title", "Proyecto")}</title>
-                    <style>
-                        body {{
-                            font-family: Arial, sans-serif;
-                            max-width: 900px;
-                            margin: 40px auto;
-                            padding: 20px;
-                            line-height: 1.6;
-                        }}
-                        pre {{
-                            background: #f4f4f4;
-                            padding: 16px;
-                            border-radius: 8px;
-                            overflow-x: auto;
-                        }}
-                    </style>
-                </head>
-                <body>
-                    <h1>{project.get("title", "Proyecto")}</h1>
-                    <pre>{content}</pre>
-                </body>
-                </html>
-                """
+            html = project.get("html_content") or project.get("content") or ""
 
             self.send_response(200)
             self.send_header("Content-type", "text/html; charset=utf-8")
@@ -136,22 +105,20 @@ def run_web_server():
     server.serve_forever()
 
 
-# --- PROMPTS EXTERNOS ---
+# ---------------------------------------------------
+# PROMPTS
+# ---------------------------------------------------
 def load_prompt_file(filename, fallback=""):
     try:
         with open(filename, "r", encoding="utf-8") as f:
             return f.read().strip()
-    except FileNotFoundError:
-        logging.warning(f"No se encontró {filename}. Usando fallback.")
-        return fallback
-    except Exception as e:
-        logging.error(f"Error leyendo {filename}: {e}")
+    except Exception:
         return fallback
 
 
 SELF_PROMPT = load_prompt_file(
     "self.txt",
-    "Sos Bozi-bot, un asistente técnico especializado en IT, Cybersecurity y programación."
+    "Sos Bozi-bot, asistente técnico experto en IT, Cybersecurity y programación."
 )
 
 KNOWLEDGE_PROMPT = load_prompt_file(
@@ -166,7 +133,7 @@ RULES_PROMPT = load_prompt_file(
 
 MEMORY_PROMPT = load_prompt_file(
     "memory.txt",
-    "Usá el historial reciente y recuerdos relevantes de largo plazo cuando sirvan."
+    "Usá historial reciente y recuerdos relevantes solo cuando ayuden."
 )
 
 SYSTEM_PROMPT = f"""
@@ -178,116 +145,67 @@ SYSTEM_PROMPT = f"""
 
 {MEMORY_PROMPT}
 
-REGLAS EXTRA:
-- Si el usuario pide una página, landing, dashboard, sitio web, visualizador, panel o app simple, NO des instrucciones: construí directamente el proyecto.
-- Para proyectos web simples generá HTML completo, funcional y renderizable.
-- Usá CSS y JavaScript embebidos dentro del HTML.
-- No menciones Supabase salvo que el usuario lo pregunte.
+REGLAS DE FLUJO:
+- Conversá naturalmente.
+- No guardes cada charla como proyecto.
+- Solo creá un borrador cuando el usuario pida construir, diseñar, crear, desarrollar o armar algo concreto.
+- No publiques URL automáticamente.
+- Publicá únicamente cuando el usuario diga: publicalo, crear URL, pasame la URL, guardar como proyecto, deployalo o similar.
+- Si el usuario pide cambios, modificá el borrador actual.
+- Si el usuario solo consulta o debate, respondé normal.
 """.strip()
 
 
 HTML_BUILDER_PROMPT = """
 Sos un desarrollador frontend experto.
 
-Tu tarea es crear un proyecto web completo y visible en navegador.
+Creá un HTML completo, moderno, responsive y funcional.
 
 REGLAS:
-- Devolvé SOLO HTML completo.
+- Devolvé SOLO HTML.
 - No uses markdown.
 - No uses explicaciones.
 - No uses ```html.
-- El archivo debe empezar con <!DOCTYPE html>.
-- Incluir CSS dentro de <style>.
-- Incluir JavaScript dentro de <script> si hace falta.
-- Debe ser responsive.
-- Debe verse profesional, moderno y prolijo.
-- No uses recursos externos obligatorios.
-- Si necesitás imágenes, usá placeholders visuales con CSS.
+- Debe empezar con <!DOCTYPE html>.
+- CSS dentro de <style>.
+- JavaScript dentro de <script> si hace falta.
+- Diseño profesional, limpio, responsive.
+- No uses dependencias externas obligatorias.
 """
 
 
-# --- UTILIDADES ---
+INTENT_PROMPT = """
+Clasificá la intención del usuario.
+
+Respondé SOLO una de estas etiquetas:
+
+CHAT_SIMPLE
+PROJECT_DRAFT_CREATE
+PROJECT_DRAFT_EDIT
+PROJECT_PUBLISH
+PROJECT_VIEW_DRAFT
+PROJECT_LIST
+PROJECT_VIEW_PUBLISHED
+
+Criterios:
+- CHAT_SIMPLE: dudas, charla, debate, explicación, consulta técnica.
+- PROJECT_DRAFT_CREATE: pide crear, diseñar, armar, desarrollar una web, landing, dashboard, página o interfaz.
+- PROJECT_DRAFT_EDIT: pide cambiar, modificar, mejorar o agregar algo al borrador/proyecto actual.
+- PROJECT_PUBLISH: pide publicar, crear URL, pasar URL, guardar como proyecto final o deployar.
+- PROJECT_VIEW_DRAFT: pide ver el borrador actual.
+- PROJECT_LIST: pide listar proyectos.
+- PROJECT_VIEW_PUBLISHED: pide ver proyecto publicado por ID.
+"""
+
+
+# ---------------------------------------------------
+# UTILIDADES
+# ---------------------------------------------------
 def trim_text(text, max_chars=1200):
     if not text:
         return ""
-
     text = str(text).strip()
-
-    if len(text) <= max_chars:
-        return text
-
-    return text[:max_chars] + "..."
-
-
-def send_to_webhook(data):
-    if not WEBHOOK_DEBUG_URL:
-        return
-
-    try:
-        response = requests.post(WEBHOOK_DEBUG_URL, json=data, timeout=8)
-        logging.info(f"Webhook.site respondió HTTP {response.status_code}")
-    except Exception as e:
-        logging.error(f"Error enviando a Webhook.site: {e}")
-
-
-def should_search_web(text: str) -> bool:
-    if USE_WEB_SEARCH == "false":
-        return False
-
-    if USE_WEB_SEARCH == "true":
-        return True
-
-    keywords = [
-        "actual", "hoy", "último", "ultima", "última", "nuevo", "nueva",
-        "precio", "cotización", "cotizacion", "versión", "version",
-        "noticia", "2026", "render", "openai", "telegram", "supabase",
-        "error", "api", "documentación", "documentacion"
-    ]
-
-    return any(k in text.lower() for k in keywords)
-
-
-def is_web_project_request(text: str) -> bool:
-    t = text.lower()
-
-    keywords = [
-        "pagina", "página", "landing", "sitio", "web", "dashboard",
-        "panel", "visual", "interfaz", "frontend", "html", "css",
-        "javascript", "app visual", "pagina para", "página para"
-    ]
-
-    return any(k in t for k in keywords)
-
-
-def is_project_request(text: str, answer: str = "") -> bool:
-    text_lower = text.lower()
-    answer_lower = answer.lower()
-
-    trigger_words = [
-        "proyecto", "crear", "armar", "generar", "desarrollar", "diseñar",
-        "configurar", "automatizar", "script", "codigo", "código",
-        "dockerfile", "app.py", "requirements", "bot", "api", "webhook",
-        "documentar", "pasame completo", "archivo completo", "landing",
-        "pagina", "página", "dashboard"
-    ]
-
-    answer_indicators = [
-        "```", "dockerfile", "requirements.txt", "app.py",
-        "paso 1", "paso 2", "configuración", "script", "<!doctype html"
-    ]
-
-    return any(w in text_lower for w in trigger_words) or any(w in answer_lower for w in answer_indicators)
-
-
-def extract_project_title(user_text: str):
-    return trim_text(user_text, 100) or "Proyecto generado por Bozi-bot"
-
-
-def get_project_url(project_id):
-    if PUBLIC_BASE_URL:
-        return f"{PUBLIC_BASE_URL}/projects/{project_id}"
-
-    return f"/projects/{project_id}"
+    return text if len(text) <= max_chars else text[:max_chars] + "..."
 
 
 def clean_html_output(text):
@@ -295,15 +213,64 @@ def clean_html_output(text):
         return ""
 
     text = text.strip()
-
     text = re.sub(r"^```html\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^```\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
 
+    if not text.lower().startswith("<!doctype html"):
+        text = "<!DOCTYPE html>\n" + text
+
     return text.strip()
 
 
-# --- MEMORIA SEMÁNTICA ---
+def get_project_url(project_id):
+    if PUBLIC_BASE_URL:
+        return f"{PUBLIC_BASE_URL}/projects/{project_id}"
+    return f"/projects/{project_id}"
+
+
+def send_to_webhook(data):
+    if not WEBHOOK_DEBUG_URL:
+        return
+
+    try:
+        requests.post(WEBHOOK_DEBUG_URL, json=data, timeout=8)
+    except Exception as e:
+        logging.error(f"Error enviando a Webhook.site: {e}")
+
+
+def classify_intent(user_text):
+    try:
+        response = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=INTENT_PROMPT,
+            input=user_text,
+            max_output_tokens=20,
+            temperature=0
+        )
+
+        intent = response.output_text.strip().upper()
+
+        valid = {
+            "CHAT_SIMPLE",
+            "PROJECT_DRAFT_CREATE",
+            "PROJECT_DRAFT_EDIT",
+            "PROJECT_PUBLISH",
+            "PROJECT_VIEW_DRAFT",
+            "PROJECT_LIST",
+            "PROJECT_VIEW_PUBLISHED"
+        }
+
+        return intent if intent in valid else "CHAT_SIMPLE"
+
+    except Exception as e:
+        logging.error(f"Error clasificando intención: {e}")
+        return "CHAT_SIMPLE"
+
+
+# ---------------------------------------------------
+# MEMORIA
+# ---------------------------------------------------
 def get_openai_embedding(text):
     if not USE_EMBEDDINGS:
         return None
@@ -313,11 +280,10 @@ def get_openai_embedding(text):
             model=OPENAI_EMBEDDING_MODEL,
             input=trim_text(text, 6000)
         )
-
         return response.data[0].embedding
 
     except Exception as e:
-        logging.error(f"Error generando embedding con OpenAI: {e}")
+        logging.error(f"Error generando embedding: {e}")
         return None
 
 
@@ -335,7 +301,7 @@ def save_memory(chat_id, role, content, embedding=None):
         supabase.table("bot_memory").insert(data).execute()
 
     except Exception as e:
-        logging.error(f"Error guardando memoria en Supabase: {e}")
+        logging.error(f"Error guardando memoria: {e}")
 
 
 def get_recent_history(chat_id):
@@ -353,7 +319,7 @@ def get_recent_history(chat_id):
         return list(reversed(res.data or []))
 
     except Exception as e:
-        logging.error(f"Error recuperando historial reciente: {e}")
+        logging.error(f"Error recuperando historial: {e}")
         return []
 
 
@@ -371,38 +337,156 @@ def get_semantic_memories(chat_id, query_embedding):
             }
         ).execute()
 
-        memories = res.data or []
-        return [m for m in memories if m.get("similarity", 0) >= 0.25]
+        return [m for m in (res.data or []) if m.get("similarity", 0) >= 0.25]
 
     except Exception as e:
         logging.error(f"Error buscando memoria semántica: {e}")
         return []
 
 
-# --- PROYECTOS ---
-def save_project(chat_id, title, content, source_message, project_type="text", html_content=None):
+# ---------------------------------------------------
+# WEB SEARCH
+# ---------------------------------------------------
+def should_search_web(text):
+    if USE_WEB_SEARCH == "false":
+        return False
+
+    if USE_WEB_SEARCH == "true":
+        return True
+
+    keywords = [
+        "actual", "hoy", "último", "ultima", "última", "nuevo", "nueva",
+        "precio", "cotización", "version", "versión", "noticia",
+        "render", "openai", "telegram", "supabase", "api", "documentación"
+    ]
+
+    return any(k in text.lower() for k in keywords)
+
+
+def get_web_context(user_text):
+    if not tavily_client or not should_search_web(user_text):
+        return ""
+
+    try:
+        search_res = tavily_client.search(
+            query=user_text,
+            max_results=2,
+            search_depth="basic"
+        )
+
+        results = search_res.get("results", [])
+
+        compact = []
+        for r in results[:2]:
+            compact.append({
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "content": trim_text(r.get("content", ""), 600)
+            })
+
+        return f"Contexto web reciente: {compact}"
+
+    except Exception as e:
+        logging.error(f"Error Tavily: {e}")
+        return ""
+
+
+# ---------------------------------------------------
+# DRAFTS Y PROYECTOS
+# ---------------------------------------------------
+def create_draft(chat_id, title, html_content, source_message):
+    try:
+        res = (
+            supabase
+            .table("project_drafts")
+            .insert({
+                "chat_id": chat_id,
+                "title": trim_text(title, 150),
+                "draft_type": "html",
+                "html_content": html_content,
+                "source_message": trim_text(source_message, 3000),
+                "status": "draft"
+            })
+            .execute()
+        )
+
+        return res.data[0] if res.data else None
+
+    except Exception as e:
+        logging.error(f"Error creando draft: {e}")
+        return None
+
+
+def get_latest_draft(chat_id):
+    try:
+        res = (
+            supabase
+            .table("project_drafts")
+            .select("id, title, html_content, source_message, status, created_at, updated_at")
+            .eq("chat_id", chat_id)
+            .eq("status", "draft")
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        return res.data[0] if res.data else None
+
+    except Exception as e:
+        logging.error(f"Error obteniendo draft: {e}")
+        return None
+
+
+def update_draft(chat_id, draft_id, html_content, source_message):
+    try:
+        res = (
+            supabase
+            .table("project_drafts")
+            .update({
+                "html_content": html_content,
+                "source_message": trim_text(source_message, 3000),
+                "updated_at": "now()"
+            })
+            .eq("chat_id", chat_id)
+            .eq("id", draft_id)
+            .execute()
+        )
+
+        return res.data[0] if res.data else None
+
+    except Exception as e:
+        logging.error(f"Error actualizando draft: {e}")
+        return None
+
+
+def publish_draft(chat_id, draft):
     try:
         res = (
             supabase
             .table("projects")
             .insert({
                 "chat_id": chat_id,
-                "title": trim_text(title, 150),
-                "content": trim_text(content, 25000),
-                "source_message": trim_text(source_message, 3000),
-                "project_type": project_type,
-                "html_content": html_content
+                "title": draft["title"],
+                "content": draft["html_content"],
+                "source_message": draft.get("source_message", ""),
+                "project_type": "html",
+                "html_content": draft["html_content"]
             })
             .execute()
         )
 
-        if res.data and len(res.data) > 0:
-            return res.data[0]
+        project = res.data[0] if res.data else None
 
-        return None
+        if project:
+            supabase.table("project_drafts").update({
+                "status": "published",
+                "updated_at": "now()"
+            }).eq("id", draft["id"]).execute()
+
+        return project
 
     except Exception as e:
-        logging.error(f"Error guardando proyecto en Supabase: {e}")
+        logging.error(f"Error publicando draft: {e}")
         return None
 
 
@@ -425,28 +509,6 @@ def list_projects(chat_id, limit=10):
         return []
 
 
-def get_project(chat_id, project_id):
-    try:
-        res = (
-            supabase
-            .table("projects")
-            .select("id, title, content, html_content, project_type, source_message, created_at, updated_at")
-            .eq("chat_id", chat_id)
-            .eq("id", project_id)
-            .limit(1)
-            .execute()
-        )
-
-        if res.data:
-            return res.data[0]
-
-        return None
-
-    except Exception as e:
-        logging.error(f"Error obteniendo proyecto: {e}")
-        return None
-
-
 def get_project_by_id(project_id):
     try:
         res = (
@@ -458,95 +520,48 @@ def get_project_by_id(project_id):
             .execute()
         )
 
-        if res.data:
-            return res.data[0]
-
-        return None
+        return res.data[0] if res.data else None
 
     except Exception as e:
         logging.error(f"Error obteniendo proyecto público: {e}")
         return None
 
 
-def update_project_html(chat_id, project_id, html_content, source_message):
+def get_project(chat_id, project_id):
     try:
         res = (
             supabase
             .table("projects")
-            .update({
-                "content": trim_text(html_content, 25000),
-                "html_content": html_content,
-                "project_type": "html",
-                "source_message": trim_text(source_message, 3000)
-            })
+            .select("id, title, content, html_content, project_type")
             .eq("chat_id", chat_id)
             .eq("id", project_id)
+            .limit(1)
             .execute()
         )
 
-        if res.data:
-            return res.data[0]
-
-        return None
+        return res.data[0] if res.data else None
 
     except Exception as e:
-        logging.error(f"Error actualizando proyecto HTML: {e}")
+        logging.error(f"Error obteniendo proyecto: {e}")
         return None
 
 
-# --- WEB SEARCH ---
-def get_web_context(user_text):
-    if not tavily_client:
-        return ""
-
-    if not should_search_web(user_text):
-        return ""
-
-    try:
-        search_res = tavily_client.search(
-            query=user_text,
-            max_results=2,
-            search_depth="basic"
-        )
-
-        results = search_res.get("results", [])
-
-        compact_results = []
-
-        for r in results[:2]:
-            compact_results.append({
-                "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "content": trim_text(r.get("content", ""), 600)
-            })
-
-        return f"Contexto web reciente: {compact_results}"
-
-    except Exception as e:
-        logging.error(f"Error en Tavily: {e}")
-        return ""
-
-
-# --- OPENAI ---
-def build_openai_input(user_text, history, semantic_memories, web_context):
+# ---------------------------------------------------
+# OPENAI
+# ---------------------------------------------------
+def build_chat_input(user_text, history, semantic_memories, web_context):
     messages = []
 
     if semantic_memories:
         memory_lines = []
-
         for m in semantic_memories:
-            role = m.get("role", "unknown")
-            content = trim_text(m.get("content", ""), 900)
-            created_at = m.get("created_at", "")
-            similarity = round(float(m.get("similarity", 0)), 3)
-
             memory_lines.append(
-                f"- Fecha: {created_at} | Rol: {role} | Similitud: {similarity} | Contenido: {content}"
+                f"- {trim_text(m.get('content', ''), 800)}"
             )
 
         messages.append({
             "role": "user",
-            "content": "Recuerdos relevantes de conversaciones anteriores:\n" + "\n".join(memory_lines)
+            "content": "Recuerdos relevantes:\n" + "\n".join(memory_lines)
         })
 
     for m in history:
@@ -557,25 +572,18 @@ def build_openai_input(user_text, history, semantic_memories, web_context):
             role = "user"
 
         if content:
-            messages.append({
-                "role": role,
-                "content": content
-            })
+            messages.append({"role": role, "content": content})
 
-    final_user_message = user_text
+    final = user_text
 
     if web_context:
-        final_user_message += f"\n\nContexto externo disponible:\n{trim_text(web_context, 1800)}"
+        final += f"\n\nContexto externo:\n{trim_text(web_context, 1800)}"
 
-    messages.append({
-        "role": "user",
-        "content": final_user_message
-    })
-
+    messages.append({"role": "user", "content": final})
     return messages
 
 
-def ask_openai(input_messages):
+def ask_openai_chat(input_messages):
     response = openai_client.responses.create(
         model=OPENAI_MODEL,
         instructions=SYSTEM_PROMPT,
@@ -584,22 +592,16 @@ def ask_openai(input_messages):
         temperature=0.4
     )
 
-    answer = response.output_text.strip()
-
-    if not answer:
-        answer = "No pude generar una respuesta clara. Probá reformulando la consulta."
-
-    return answer
+    return response.output_text.strip() or "No pude generar una respuesta clara."
 
 
-def generate_html_project(user_text, semantic_memories=None):
+def generate_html_from_request(user_text, semantic_memories=None):
     memory_context = ""
 
     if semantic_memories:
-        lines = []
-        for m in semantic_memories[:4]:
-            lines.append(trim_text(m.get("content", ""), 700))
-        memory_context = "\n\nContexto útil de memoria:\n" + "\n".join(lines)
+        memory_context = "\n\nContexto útil:\n" + "\n".join(
+            [trim_text(m.get("content", ""), 700) for m in semantic_memories[:4]]
+        )
 
     response = openai_client.responses.create(
         model=OPENAI_MODEL,
@@ -609,92 +611,11 @@ def generate_html_project(user_text, semantic_memories=None):
         temperature=0.35
     )
 
-    html = clean_html_output(response.output_text)
-
-    if not html.lower().startswith("<!doctype html"):
-        html = "<!DOCTYPE html>\n" + html
-
-    return html
+    return clean_html_output(response.output_text)
 
 
-# --- COMANDOS ---
-async def handle_project_commands(chat_id, user_text, update):
-    text = user_text.strip().lower()
-
-    if text in ["/proyectos", "proyectos", "listar proyectos", "mis proyectos"]:
-        projects = list_projects(chat_id)
-
-        if not projects:
-            await update.message.reply_text("Todavía no tengo proyectos guardados.")
-            return True
-
-        lines = ["Tus últimos proyectos guardados:\n"]
-
-        for p in projects:
-            url = get_project_url(p["id"]) if p.get("project_type") == "html" else ""
-            line = f"#{p['id']} - {p['title']} [{p.get('project_type', 'text')}]"
-            if url:
-                line += f"\n{url}"
-            lines.append(line)
-
-        lines.append("\nPara ver uno: ver proyecto 12")
-        await update.message.reply_text("\n\n".join(lines))
-        return True
-
-    if text.startswith("ver proyecto "):
-        try:
-            project_id = int(text.replace("ver proyecto ", "").strip())
-        except ValueError:
-            await update.message.reply_text("Usá el formato: ver proyecto 12")
-            return True
-
-        project = get_project(chat_id, project_id)
-
-        if not project:
-            await update.message.reply_text("No encontré ese proyecto.")
-            return True
-
-        if project.get("project_type") == "html":
-            await update.message.reply_text(
-                f"Proyecto #{project['id']} - {project['title']}\n\nVer online:\n{get_project_url(project['id'])}"
-            )
-            return True
-
-        content = project["content"]
-
-        if len(content) > 3500:
-            content = content[:3500] + "\n\n...contenido recortado por límite de Telegram."
-
-        await update.message.reply_text(
-            f"Proyecto #{project['id']} - {project['title']}\n\n{content}"
-        )
-        return True
-
-    edit_match = re.match(r"^(editar|modificar|cambiar) proyecto (\d+)\s*(.*)$", user_text.strip(), re.IGNORECASE)
-
-    if edit_match:
-        project_id = int(edit_match.group(2))
-        change_request = edit_match.group(3).strip()
-
-        if not change_request:
-            await update.message.reply_text(
-                f"Decime qué cambio querés hacer. Ejemplo:\neditar proyecto {project_id} cambiar el color principal a azul oscuro"
-            )
-            return True
-
-        project = get_project(chat_id, project_id)
-
-        if not project:
-            await update.message.reply_text("No encontré ese proyecto.")
-            return True
-
-        if project.get("project_type") != "html":
-            await update.message.reply_text("Por ahora solo puedo editar proyectos web HTML publicados.")
-            return True
-
-        old_html = project.get("html_content") or ""
-
-        edit_prompt = f"""
+def edit_html(old_html, change_request):
+    prompt = f"""
 HTML actual:
 {old_html}
 
@@ -704,136 +625,170 @@ Cambio solicitado:
 Devolvé el HTML completo actualizado.
 """
 
-        try:
-            response = openai_client.responses.create(
-                model=OPENAI_MODEL,
-                instructions=HTML_BUILDER_PROMPT,
-                input=edit_prompt,
-                max_output_tokens=2600,
-                temperature=0.3
-            )
+    response = openai_client.responses.create(
+        model=OPENAI_MODEL,
+        instructions=HTML_BUILDER_PROMPT,
+        input=prompt,
+        max_output_tokens=2600,
+        temperature=0.3
+    )
 
-            new_html = clean_html_output(response.output_text)
-
-            updated = update_project_html(
-                chat_id=chat_id,
-                project_id=project_id,
-                html_content=new_html,
-                source_message=change_request
-            )
-
-            if updated:
-                await update.message.reply_text(
-                    f"Listo Iván. Proyecto #{project_id} actualizado.\n\nVer online:\n{get_project_url(project_id)}"
-                )
-            else:
-                await update.message.reply_text("No pude actualizar el proyecto.")
-
-            return True
-
-        except Exception as e:
-            logging.error(f"Error editando proyecto: {e}")
-            await update.message.reply_text("Se me complicó editar el proyecto. Revisá logs de Render.")
-            return True
-
-    return False
+    return clean_html_output(response.output_text)
 
 
-# --- BOT ---
+# ---------------------------------------------------
+# BOT
+# ---------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text or ""
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    command_handled = await handle_project_commands(chat_id, user_text, update)
-    if command_handled:
-        return
+    intent = classify_intent(user_text)
+    logging.info(f"Intent detectado: {intent}")
 
     user_embedding = get_openai_embedding(user_text)
-
     save_memory(chat_id, "user", user_text, user_embedding)
 
-    history = get_recent_history(chat_id)
     semantic_memories = get_semantic_memories(chat_id, user_embedding)
+    history = get_recent_history(chat_id)
     web_context = get_web_context(user_text)
 
-    try:
-        if is_web_project_request(user_text):
-            html = generate_html_project(user_text, semantic_memories)
-            title = extract_project_title(user_text)
+    project_saved = None
+    draft_saved = None
 
-            project_saved = save_project(
+    try:
+        if intent == "PROJECT_DRAFT_CREATE":
+            html = generate_html_from_request(user_text, semantic_memories)
+            title = trim_text(user_text, 100)
+
+            draft_saved = create_draft(
                 chat_id=chat_id,
                 title=title,
-                content=html,
-                source_message=user_text,
-                project_type="html",
-                html_content=html
+                html_content=html,
+                source_message=user_text
             )
 
-            if project_saved:
-                project_id = project_saved["id"]
-                project_url = get_project_url(project_id)
-
+            if draft_saved:
                 answer = (
-                    f"Listo Iván. Proyecto web creado como #{project_id}.\n\n"
-                    f"Ver online:\n{project_url}\n\n"
-                    f"Para editarlo:\neditar proyecto {project_id} cambiar ..."
+                    f"Listo Iván. Te armé un primer borrador del proyecto.\n\n"
+                    f"Todavía no lo publiqué como URL final.\n\n"
+                    f"Podés decirme:\n"
+                    f"- publicalo\n"
+                    f"- cambiar colores\n"
+                    f"- agregar sección de contacto\n"
+                    f"- ver borrador"
                 )
             else:
-                answer = "Generé el HTML, pero no pude guardarlo en Supabase."
+                answer = "Generé el borrador, pero no pude guardarlo."
+
+        elif intent == "PROJECT_DRAFT_EDIT":
+            draft = get_latest_draft(chat_id)
+
+            if not draft:
+                answer = "No tengo un borrador activo para editar. Primero pedime que cree una página o proyecto."
+            else:
+                new_html = edit_html(draft["html_content"], user_text)
+
+                draft_saved = update_draft(
+                    chat_id=chat_id,
+                    draft_id=draft["id"],
+                    html_content=new_html,
+                    source_message=user_text
+                )
+
+                answer = (
+                    "Listo Iván. Apliqué los cambios al borrador.\n\n"
+                    "Cuando quieras verlo online, decime: publicalo."
+                )
+
+        elif intent == "PROJECT_PUBLISH":
+            draft = get_latest_draft(chat_id)
+
+            if not draft:
+                answer = "No tengo un borrador activo para publicar."
+            else:
+                project_saved = publish_draft(chat_id, draft)
+
+                if project_saved:
+                    url = get_project_url(project_saved["id"])
+                    answer = (
+                        f"Listo Iván. Proyecto publicado como #{project_saved['id']}.\n\n"
+                        f"Ver online:\n{url}\n\n"
+                        f"Si querés cambios, decime: editar proyecto {project_saved['id']} ..."
+                    )
+                else:
+                    answer = "No pude publicar el proyecto."
+
+        elif intent == "PROJECT_VIEW_DRAFT":
+            draft = get_latest_draft(chat_id)
+
+            if not draft:
+                answer = "No tengo un borrador activo."
+            else:
+                answer = (
+                    f"Borrador activo: #{draft['id']}\n"
+                    f"Título: {draft['title']}\n\n"
+                    f"Todavía no está publicado. Decime 'publicalo' para crear la URL."
+                )
+
+        elif intent == "PROJECT_LIST":
+            projects = list_projects(chat_id)
+
+            if not projects:
+                answer = "Todavía no tenés proyectos publicados."
+            else:
+                lines = ["Tus últimos proyectos publicados:\n"]
+                for p in projects:
+                    lines.append(f"#{p['id']} - {p['title']}\n{get_project_url(p['id'])}")
+                answer = "\n\n".join(lines)
+
+        elif intent == "PROJECT_VIEW_PUBLISHED":
+            match = re.search(r"(\d+)", user_text)
+
+            if not match:
+                answer = "Decime el número del proyecto. Ejemplo: ver proyecto 3"
+            else:
+                project_id = int(match.group(1))
+                project = get_project(chat_id, project_id)
+
+                if not project:
+                    answer = "No encontré ese proyecto."
+                else:
+                    answer = f"Proyecto #{project_id}:\n{get_project_url(project_id)}"
 
         else:
-            input_messages = build_openai_input(
+            input_messages = build_chat_input(
                 user_text=user_text,
                 history=history,
                 semantic_memories=semantic_memories,
                 web_context=web_context
             )
 
-            answer = ask_openai(input_messages)
-
-            project_saved = None
-
-            if is_project_request(user_text, answer):
-                title = extract_project_title(user_text)
-
-                project_saved = save_project(
-                    chat_id=chat_id,
-                    title=title,
-                    content=answer,
-                    source_message=user_text,
-                    project_type="text"
-                )
-
-                if project_saved:
-                    answer += f"\n\nProyecto guardado como #{project_saved['id']}."
-                    answer += f"\nPara verlo después: ver proyecto {project_saved['id']}"
+            answer = ask_openai_chat(input_messages)
 
     except Exception as e:
-        logging.error(f"Error en OpenAI/proyecto: {e}")
+        logging.error(f"Error procesando mensaje: {e}")
         answer = "Che Iván, se me tildó la IA. Revisá logs de Render y probá de nuevo."
-        project_saved = None
 
     assistant_embedding = get_openai_embedding(answer)
     save_memory(chat_id, "assistant", answer, assistant_embedding)
 
     send_to_webhook({
-        "type": "bot_project_output",
+        "type": "bot_output",
+        "intent": intent,
         "chat_id": chat_id,
         "user_message": user_text,
         "bot_response": answer,
+        "draft_saved": draft_saved,
         "project_saved": project_saved,
-        "semantic_memories_used": semantic_memories,
-        "web_context_used": web_context,
         "model": OPENAI_MODEL
     })
 
     await update.message.reply_text(answer)
 
 
-# --- EJECUCIÓN ---
 if __name__ == "__main__":
     threading.Thread(target=run_web_server, daemon=True).start()
 
@@ -843,6 +798,6 @@ if __name__ == "__main__":
         MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
     )
 
-    logging.info("Bozi-bot Builder listo: Telegram + OpenAI + Supabase + URLs.")
+    logging.info("Bozi-bot natural builder listo.")
 
     application.run_polling(drop_pending_updates=True)
