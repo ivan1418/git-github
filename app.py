@@ -1847,7 +1847,7 @@ async def panel_health_text(context, chat_id):
             model=OPENAI_MODEL,
             instructions="Respondé solo OK.",
             input="healthcheck",
-            max_output_tokens=10,
+            max_output_tokens=20,
             temperature=0,
         )
         result = response.output_text.strip()
