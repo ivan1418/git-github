@@ -788,11 +788,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(answer)
 
+async def telegram_startup_cleanup(application):
+    try:
+        logging.info("Limpiando webhook y updates pendientes de Telegram...")
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logging.info("Webhook eliminado y updates pendientes limpiados.")
+    except Exception as e:
+        logging.error(f"Error limpiando Telegram al iniciar: {e}")
 
 if __name__ == "__main__":
     threading.Thread(target=run_web_server, daemon=True).start()
 
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application = (
+    ApplicationBuilder()
+    .token(TELEGRAM_TOKEN)
+    .post_init(telegram_startup_cleanup)
+    .build()
+)
 
     application.add_handler(
         MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
@@ -800,4 +812,7 @@ if __name__ == "__main__":
 
     logging.info("Bozi-bot natural builder listo.")
 
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling(
+    drop_pending_updates=True,
+    allowed_updates=Update.ALL_TYPES
+)
