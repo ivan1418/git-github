@@ -4,7 +4,7 @@ import json
 import logging
 import threading
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -12,7 +12,14 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    CommandHandler,
+    CallbackQueryHandler,
+    filters,
+)
 
 from supabase import create_client
 from openai import OpenAI
@@ -45,8 +52,28 @@ MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1000"))
 USE_EMBEDDINGS = os.getenv("USE_EMBEDDINGS", "true").lower() == "true"
 USE_WEB_SEARCH = os.getenv("USE_WEB_SEARCH", "smart").lower()
 
-LOCAL_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 LOCAL_TZ_NAME = "America/Argentina/Buenos_Aires"
+LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
+
+ALLOWED_MODELS = {
+    "gpt-4o-mini",
+    "gpt-4.1-mini",
+    "gpt-4.1",
+    "gpt-4o",
+}
+
+DEFAULT_BOT_CONFIG = {
+    "mode": "asistente_general_tecnico",
+    "response_style": "natural_profesional",
+    "detail_level": "medio",
+    "technical_depth": "alto",
+    "project_behavior": "draft_first",
+    "agent_team": "enabled",
+    "auto_publish_projects": "false",
+    "web_search": USE_WEB_SEARCH,
+    "model": OPENAI_MODEL,
+    "max_output_tokens": str(MAX_OUTPUT_TOKENS),
+}
 
 if not TELEGRAM_TOKEN:
     raise ValueError("Falta TELEGRAM_TOKEN.")
@@ -149,7 +176,7 @@ MEMORY_PROMPT = load_prompt_file(
 )
 
 
-SYSTEM_PROMPT = f"""
+BASE_SYSTEM_PROMPT = f"""
 {SELF_PROMPT}
 
 {KNOWLEDGE_PROMPT}
@@ -166,6 +193,7 @@ CAPACIDADES REALES DEL SISTEMA:
 - Podés guardar tareas programadas.
 - Podés enviar reportes automáticos por Telegram.
 - Podés listar tareas y proyectos.
+- Podés cambiar configuración dinámica guardada en Supabase sin necesidad de redeploy.
 - Podés actuar como gerente general ficticio si Iván lo pide.
 - Podés usar agentes ficticios internos: CTO, DevOps, Frontend, Backend, UX/UI, Blue Team, Red Team ético, Sysadmin e Infraestructura.
 - Podés ayudar con temas generales, pero tu especialidad fuerte es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización.
@@ -206,6 +234,8 @@ Clasificá la intención del usuario.
 Respondé SOLO una etiqueta:
 
 CHAT_SIMPLE
+CONFIG_UPDATE
+CONFIG_VIEW
 PROJECT_DRAFT_CREATE
 PROJECT_DRAFT_EDIT
 PROJECT_PUBLISH
@@ -219,6 +249,8 @@ TIME_REMAINING
 
 Criterios:
 CHAT_SIMPLE = charla, duda, debate, consulta, pensar juntos, preguntar si algo se puede.
+CONFIG_UPDATE = pide cambiar el modo, personalidad, tono, modelo, nivel de detalle, comportamiento, activar modo gerente o modificar configuración del bot.
+CONFIG_VIEW = pide ver configuración actual del bot.
 PROJECT_DRAFT_CREATE = pide crear/diseñar/desarrollar una web, página, landing, dashboard, interfaz, app visual o proyecto entregable.
 PROJECT_DRAFT_EDIT = pide cambiar/modificar/mejorar/agregar algo al borrador actual.
 PROJECT_PUBLISH = pide publicar, crear URL, pasar URL, deployar o guardar como proyecto final.
@@ -251,8 +283,41 @@ Reglas:
 - Si dice todos los días / diariamente, schedule_type = daily.
 - Si dice mañana, una vez, hoy, o fecha específica, schedule_type = once.
 - Si no indica hora, usar 09:00.
-- Si el usuario dice "hoy a las 16:45", crear due_at para hoy a las 16:45 en zona horaria Argentina/Buenos Aires.
+- Si el usuario dice "hoy a las 16:45", crear due_at para hoy a las 16:45 en zona horaria Argentina/Buenos_Aires.
 - No agregues texto fuera del JSON.
+"""
+
+
+CONFIG_EXTRACT_PROMPT = """
+Extraé cambios de configuración pedidos por el usuario.
+
+Devolvé SOLO JSON válido.
+
+Campos posibles:
+{
+  "mode": "asistente_general_tecnico | gerente_general | cto | devops | cybersec | sysadmin | diseñador_ux | minimalista",
+  "response_style": "natural_profesional | ejecutivo | tecnico | cercano | directo | didactico",
+  "detail_level": "bajo | medio | alto",
+  "technical_depth": "bajo | medio | alto",
+  "project_behavior": "draft_first | auto_draft | ask_before_project",
+  "agent_team": "enabled | disabled",
+  "auto_publish_projects": "true | false",
+  "web_search": "smart | true | false",
+  "model": "gpt-4o-mini | gpt-4.1-mini | gpt-4.1 | gpt-4o",
+  "max_output_tokens": "500 | 800 | 1000 | 1500 | 2000"
+}
+
+Reglas:
+- Solo incluí campos que el usuario realmente pidió cambiar.
+- Si pide "modo gerente", mode = gerente_general y agent_team = enabled.
+- Si pide respuestas más cortas, detail_level = bajo y max_output_tokens = 500.
+- Si pide respuestas más completas, detail_level = alto y max_output_tokens = 1500.
+- Si pide tono ejecutivo, response_style = ejecutivo.
+- Si pide modo técnico, response_style = tecnico y technical_depth = alto.
+- Si pide no guardar proyectos sin permiso, project_behavior = draft_first.
+- Si pide publicar automáticamente, auto_publish_projects = true.
+- Si pide no publicar automáticamente, auto_publish_projects = false.
+- No agregues explicación fuera del JSON.
 """
 
 
@@ -294,6 +359,13 @@ def clean_html_output(text):
     return text.strip()
 
 
+def parse_json_output(raw):
+    raw = raw.strip()
+    raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```$", "", raw)
+    return json.loads(raw)
+
+
 def get_project_url(project_id):
     if PUBLIC_BASE_URL:
         return f"{PUBLIC_BASE_URL}/projects/{project_id}"
@@ -328,7 +400,7 @@ def is_task_capability_question(text):
     return (
         ("puedo" in t or "podés" in t or "podes" in t or "podria" in t or "podría" in t or "podrias" in t or "podrías" in t)
         and ("todos los días" in t or "diario" in t or "diaria" in t or "tareas" in t or "reporte" in t or "reportes" in t)
-        and ("mandes" in t or "enviarme" in t or "enviar" in t or "mandarme" in t or "enviarme" in t)
+        and ("mandes" in t or "enviarme" in t or "enviar" in t or "mandarme" in t)
     )
 
 
@@ -344,6 +416,63 @@ def is_time_remaining_question(text):
         or "cuanto tiempo queda" in t
         or "cuánto tiempo queda" in t
     )
+
+
+def is_config_view_question(text):
+    t = text.lower()
+    return (
+        "ver configuración" in t
+        or "ver configuracion" in t
+        or "mi configuración" in t
+        or "mi configuracion" in t
+        or "tu configuración" in t
+        or "tu configuracion" in t
+        or "como estas configurado" in t
+        or "cómo estás configurado" in t
+        or "modelos disponibles" in t
+        or "qué modelos puedo usar" in t
+        or "que modelos puedo usar" in t
+    )
+
+
+def is_config_update_question(text):
+    t = text.lower()
+    triggers = [
+        "cambiá tu",
+        "cambia tu",
+        "cambiame tu",
+        "configurate",
+        "activá modo",
+        "activa modo",
+        "modo gerente",
+        "modo cto",
+        "modo devops",
+        "modo cyber",
+        "respondé más corto",
+        "responde más corto",
+        "respondé mas corto",
+        "responde mas corto",
+        "respondé más completo",
+        "responde más completo",
+        "respondé mas completo",
+        "responde mas completo",
+        "tono ejecutivo",
+        "tono técnico",
+        "tono tecnico",
+        "cambia el modelo",
+        "cambiá el modelo",
+        "usa el modelo",
+        "usá el modelo",
+        "no publiques automáticamente",
+        "no publiques automaticamente",
+        "publicá automáticamente",
+        "publica automaticamente",
+        "desactivá web search",
+        "desactiva web search",
+        "activá web search",
+        "activa web search",
+    ]
+    return any(trigger in t for trigger in triggers)
 
 
 def parse_datetime_to_local(value):
@@ -393,8 +522,303 @@ def calculate_time_remaining(due_at_str):
         return "No pude calcular el tiempo restante."
 
 
+# ---------------------------------------------------
+# EVENTOS / PANEL
+# ---------------------------------------------------
+def log_event(chat_id, event_type, message, metadata=None):
+    try:
+        supabase.table("bot_events").insert({
+            "chat_id": chat_id,
+            "event_type": event_type,
+            "message": trim_text(message, 2000),
+            "metadata": metadata or {},
+        }).execute()
+    except Exception as e:
+        logging.warning(f"No pude registrar evento: {e}")
+
+
+def get_recent_events(chat_id, limit=10):
+    try:
+        res = (
+            supabase
+            .table("bot_events")
+            .select("id, chat_id, event_type, message, metadata, created_at")
+            .eq("chat_id", chat_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return res.data or []
+    except Exception as e:
+        logging.warning(f"No pude leer eventos: {e}")
+        return []
+
+
+def count_active_tasks(chat_id):
+    try:
+        res = (
+            supabase
+            .table("scheduled_tasks")
+            .select("id")
+            .eq("chat_id", chat_id)
+            .eq("is_active", True)
+            .execute()
+        )
+        return len(res.data or [])
+    except Exception:
+        return 0
+
+
+def count_projects(chat_id):
+    try:
+        res = (
+            supabase
+            .table("projects")
+            .select("id")
+            .eq("chat_id", chat_id)
+            .execute()
+        )
+        return len(res.data or [])
+    except Exception:
+        return 0
+
+
+def describe_agent_team():
+    return (
+        "Equipo ficticio interno disponible:\n\n"
+        "- CTO: arquitectura, decisiones técnicas y estrategia.\n"
+        "- Backend Developer: APIs, Python, lógica y datos.\n"
+        "- Frontend Developer: interfaces, HTML, CSS, JS.\n"
+        "- DevOps: Docker, Render, deploy, logs y estabilidad.\n"
+        "- UX/UI: diseño visual, experiencia y claridad.\n"
+        "- Blue Team: defensa, monitoreo, hardening y SOC.\n"
+        "- Red Team ético: pruebas autorizadas, riesgos y validación.\n"
+        "- Sysadmin: sistemas, servicios, permisos y troubleshooting.\n"
+        "- Infraestructura y redes: DNS, redes, servidores y conectividad.\n\n"
+        "Son roles ficticios internos del bot, no personas reales."
+    )
+
+
+def describe_cost_mode():
+    return (
+        "Modo costo actual:\n\n"
+        f"- Modelo principal: {OPENAI_MODEL}\n"
+        f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
+        f"- Máximo tokens salida: {MAX_OUTPUT_TOKENS}\n"
+        f"- Web search: {USE_WEB_SEARCH}\n\n"
+        "Recomendación:\n"
+        "- Usar gpt-4o-mini para bajo costo.\n"
+        "- Usar modelos más potentes solo para tareas complejas."
+    )
+
+
+def describe_mode():
+    return (
+        "Modo actual:\n\n"
+        "Asistente generalista operativo con especialización fuerte en:\n"
+        "- IT\n"
+        "- Programación\n"
+        "- Ciberseguridad\n"
+        "- Infraestructura\n"
+        "- Redes\n"
+        "- Sysadmin\n"
+        "- DevOps\n"
+        "- Automatización\n\n"
+        "También puede actuar como gerente general ficticio si se lo pedís."
+    )
+
+
+# ---------------------------------------------------
+# CONFIG DINÁMICA EN SUPABASE
+# ---------------------------------------------------
+def normalize_config_value(key, value):
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    allowed_values = {
+        "mode": {"asistente_general_tecnico", "gerente_general", "cto", "devops", "cybersec", "sysadmin", "diseñador_ux", "minimalista"},
+        "response_style": {"natural_profesional", "ejecutivo", "tecnico", "cercano", "directo", "didactico"},
+        "detail_level": {"bajo", "medio", "alto"},
+        "technical_depth": {"bajo", "medio", "alto"},
+        "project_behavior": {"draft_first", "auto_draft", "ask_before_project"},
+        "agent_team": {"enabled", "disabled"},
+        "auto_publish_projects": {"true", "false"},
+        "web_search": {"smart", "true", "false"},
+        "model": ALLOWED_MODELS,
+        "max_output_tokens": {"500", "800", "1000", "1500", "2000"},
+    }
+
+    if key not in allowed_values:
+        return None
+
+    if value not in allowed_values[key]:
+        return None
+
+    return value
+
+
+def get_bot_config(chat_id):
+    config = dict(DEFAULT_BOT_CONFIG)
+
+    try:
+        global_res = (
+            supabase
+            .table("bot_config")
+            .select("key, value")
+            .eq("chat_id", 0)
+            .execute()
+        )
+
+        for item in global_res.data or []:
+            key = item.get("key")
+            value = item.get("value")
+            if key:
+                config[key] = str(value)
+
+    except Exception as e:
+        logging.warning(f"No pude leer configuración global: {e}")
+
+    try:
+        user_res = (
+            supabase
+            .table("bot_config")
+            .select("key, value")
+            .eq("chat_id", chat_id)
+            .execute()
+        )
+
+        for item in user_res.data or []:
+            key = item.get("key")
+            value = item.get("value")
+            if key:
+                config[key] = str(value)
+
+    except Exception as e:
+        logging.warning(f"No pude leer configuración del chat: {e}")
+
+    return config
+
+
+def save_bot_config(chat_id, changes):
+    saved = {}
+
+    for key, raw_value in changes.items():
+        value = normalize_config_value(key, raw_value)
+
+        if value is None:
+            continue
+
+        try:
+            supabase.table("bot_config").upsert({
+                "chat_id": chat_id,
+                "key": key,
+                "value": value,
+                "updated_at": utc_iso(),
+            }, on_conflict="chat_id,key").execute()
+
+            saved[key] = value
+
+        except Exception as e:
+            logging.error(f"Error guardando config {key}: {e}")
+
+    return saved
+
+
+def extract_config_changes(user_text):
+    try:
+        response = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=CONFIG_EXTRACT_PROMPT,
+            input=user_text,
+            max_output_tokens=400,
+            temperature=0,
+        )
+
+        data = parse_json_output(response.output_text)
+
+        if not isinstance(data, dict):
+            return {}
+
+        return data
+
+    except Exception as e:
+        logging.error(f"Error extrayendo config: {e}")
+        return {}
+
+
+def build_runtime_system_prompt(config):
+    runtime_rules = f"""
+CONFIGURACIÓN DINÁMICA ACTUAL:
+- Modo: {config.get("mode")}
+- Estilo de respuesta: {config.get("response_style")}
+- Nivel de detalle: {config.get("detail_level")}
+- Profundidad técnica: {config.get("technical_depth")}
+- Equipo ficticio de agentes: {config.get("agent_team")}
+- Comportamiento de proyectos: {config.get("project_behavior")}
+- Auto-publicar proyectos: {config.get("auto_publish_projects")}
+- Web search: {config.get("web_search")}
+- Modelo preferido: {config.get("model")}
+
+APLICACIÓN DE CONFIGURACIÓN:
+- Si mode = gerente_general, actuá como gerente general ficticio operativo de Iván.
+- Si mode = cto, priorizá arquitectura, decisiones técnicas y calidad.
+- Si mode = devops, priorizá despliegue, Docker, CI/CD, logs y estabilidad.
+- Si mode = cybersec, priorizá seguridad, riesgos, hardening y buenas prácticas.
+- Si mode = sysadmin, priorizá operación, sistemas, servicios y troubleshooting.
+- Si detail_level = bajo, respondé más corto.
+- Si detail_level = alto, respondé con más profundidad y estructura.
+- Si response_style = ejecutivo, respondé con foco en decisiones, impacto y próximos pasos.
+- Si agent_team = enabled, podés simular internamente especialistas ficticios, pero entregá una respuesta final unificada.
+"""
+    return f"{BASE_SYSTEM_PROMPT}\n\n{runtime_rules}".strip()
+
+
+def get_model_from_config(config):
+    model = config.get("model", OPENAI_MODEL)
+
+    if model not in ALLOWED_MODELS:
+        return OPENAI_MODEL
+
+    return model
+
+
+def get_max_tokens_from_config(config, fallback=MAX_OUTPUT_TOKENS):
+    try:
+        value = int(config.get("max_output_tokens", str(fallback)))
+        return max(300, min(value, 2500))
+    except Exception:
+        return fallback
+
+
+def format_config(config):
+    return (
+        "Configuración actual del bot:\n\n"
+        f"- Modo: {config.get('mode')}\n"
+        f"- Estilo: {config.get('response_style')}\n"
+        f"- Nivel de detalle: {config.get('detail_level')}\n"
+        f"- Profundidad técnica: {config.get('technical_depth')}\n"
+        f"- Equipo ficticio de agentes: {config.get('agent_team')}\n"
+        f"- Proyectos: {config.get('project_behavior')}\n"
+        f"- Auto-publicar proyectos: {config.get('auto_publish_projects')}\n"
+        f"- Web search: {config.get('web_search')}\n"
+        f"- Modelo: {config.get('model')}\n"
+        f"- Máximo tokens salida: {config.get('max_output_tokens')}"
+    )
+
+
+# ---------------------------------------------------
+# INTENCIÓN
+# ---------------------------------------------------
 def classify_intent(user_text):
     lower = user_text.lower()
+
+    if is_config_view_question(user_text):
+        return "CONFIG_VIEW"
+
+    if is_config_update_question(user_text):
+        return "CONFIG_UPDATE"
 
     if is_time_remaining_question(user_text):
         return "TIME_REMAINING"
@@ -414,13 +838,15 @@ def classify_intent(user_text):
             instructions=INTENT_PROMPT,
             input=user_text,
             max_output_tokens=20,
-            temperature=0
+            temperature=0,
         )
 
         intent = response.output_text.strip().upper()
 
         valid = {
             "CHAT_SIMPLE",
+            "CONFIG_UPDATE",
+            "CONFIG_VIEW",
             "PROJECT_DRAFT_CREATE",
             "PROJECT_DRAFT_EDIT",
             "PROJECT_PUBLISH",
@@ -430,7 +856,7 @@ def classify_intent(user_text):
             "TASK_CREATE",
             "TASK_LIST",
             "TASK_DELETE",
-            "TIME_REMAINING"
+            "TIME_REMAINING",
         }
 
         return intent if intent in valid else "CHAT_SIMPLE"
@@ -450,7 +876,7 @@ def get_openai_embedding(text):
     try:
         response = openai_client.embeddings.create(
             model=OPENAI_EMBEDDING_MODEL,
-            input=trim_text(text, 6000)
+            input=trim_text(text, 6000),
         )
 
         return response.data[0].embedding
@@ -465,7 +891,7 @@ def save_memory(chat_id, role, content, embedding=None):
         data = {
             "chat_id": chat_id,
             "role": role,
-            "content": trim_text(content, 5000)
+            "content": trim_text(content, 5000),
         }
 
         if embedding is not None:
@@ -506,8 +932,8 @@ def get_semantic_memories(chat_id, query_embedding):
             {
                 "query_embedding": query_embedding,
                 "match_chat_id": chat_id,
-                "match_count": MAX_MEMORY_RESULTS
-            }
+                "match_count": MAX_MEMORY_RESULTS,
+            },
         ).execute()
 
         return [m for m in (res.data or []) if m.get("similarity", 0) >= 0.25]
@@ -520,11 +946,13 @@ def get_semantic_memories(chat_id, query_embedding):
 # ---------------------------------------------------
 # WEB SEARCH
 # ---------------------------------------------------
-def should_search_web(text):
-    if USE_WEB_SEARCH == "false":
+def should_search_web(text, config=None):
+    mode = (config or {}).get("web_search", USE_WEB_SEARCH)
+
+    if mode == "false":
         return False
 
-    if USE_WEB_SEARCH == "true":
+    if mode == "true":
         return True
 
     keywords = [
@@ -546,21 +974,21 @@ def should_search_web(text):
         "telegram",
         "supabase",
         "api",
-        "documentación"
+        "documentación",
     ]
 
     return any(k in text.lower() for k in keywords)
 
 
-def get_web_context(user_text):
-    if not tavily_client or not should_search_web(user_text):
+def get_web_context(user_text, config=None):
+    if not tavily_client or not should_search_web(user_text, config):
         return ""
 
     try:
         search_res = tavily_client.search(
             query=user_text,
             max_results=3,
-            search_depth="basic"
+            search_depth="basic",
         )
 
         results = search_res.get("results", [])
@@ -571,7 +999,7 @@ def get_web_context(user_text):
             compact.append({
                 "title": r.get("title", ""),
                 "url": r.get("url", ""),
-                "content": trim_text(r.get("content", ""), 700)
+                "content": trim_text(r.get("content", ""), 700),
             })
 
         return f"Contexto web reciente: {compact}"
@@ -593,7 +1021,7 @@ def create_draft(chat_id, title, html_content, source_message):
             "html_content": html_content,
             "source_message": trim_text(source_message, 3000),
             "status": "draft",
-            "updated_at": utc_iso()
+            "updated_at": utc_iso(),
         }).execute()
 
         return res.data[0] if res.data else None
@@ -631,7 +1059,7 @@ def update_draft(chat_id, draft_id, html_content, source_message):
             .update({
                 "html_content": html_content,
                 "source_message": trim_text(source_message, 3000),
-                "updated_at": utc_iso()
+                "updated_at": utc_iso(),
             })
             .eq("chat_id", chat_id)
             .eq("id", draft_id)
@@ -654,7 +1082,7 @@ def publish_draft(chat_id, draft):
             "source_message": draft.get("source_message", ""),
             "project_type": "html",
             "html_content": draft["html_content"],
-            "updated_at": utc_iso()
+            "updated_at": utc_iso(),
         }).execute()
 
         project = res.data[0] if res.data else None
@@ -662,7 +1090,7 @@ def publish_draft(chat_id, draft):
         if project:
             supabase.table("project_drafts").update({
                 "status": "published",
-                "updated_at": utc_iso()
+                "updated_at": utc_iso(),
             }).eq("id", draft["id"]).execute()
 
         return project
@@ -740,13 +1168,10 @@ def parse_task(user_text):
             instructions=TASK_EXTRACT_PROMPT,
             input=f"Fecha y hora actual: {current}\nMensaje: {user_text}",
             max_output_tokens=300,
-            temperature=0
+            temperature=0,
         )
 
-        raw = response.output_text.strip()
-        raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
-        raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
+        data = parse_json_output(response.output_text)
 
         if not data.get("timezone"):
             data["timezone"] = LOCAL_TZ_NAME
@@ -764,7 +1189,7 @@ def parse_task(user_text):
             "schedule_type": "daily",
             "time_of_day": "09:00",
             "due_at": None,
-            "timezone": LOCAL_TZ_NAME
+            "timezone": LOCAL_TZ_NAME,
         }
 
 
@@ -778,7 +1203,7 @@ def create_scheduled_task(chat_id, task_data):
             "time_of_day": task_data.get("time_of_day"),
             "due_at": task_data.get("due_at"),
             "timezone": task_data.get("timezone", LOCAL_TZ_NAME),
-            "is_active": True
+            "is_active": True,
         }).execute()
 
         return res.data[0] if res.data else None
@@ -827,7 +1252,7 @@ def delete_task(chat_id, user_text):
 
     try:
         supabase.table("scheduled_tasks").update({
-            "is_active": False
+            "is_active": False,
         }).eq("chat_id", chat_id).eq("id", task_id).execute()
 
         return True
@@ -837,8 +1262,9 @@ def delete_task(chat_id, user_text):
         return False
 
 
-def generate_task_report(task_prompt):
-    web_context = get_web_context(task_prompt)
+def generate_task_report(task_prompt, config=None):
+    web_context = get_web_context(task_prompt, config)
+    runtime_prompt = build_runtime_system_prompt(config or DEFAULT_BOT_CONFIG)
 
     prompt = f"""
 Generá el reporte solicitado por Iván.
@@ -853,11 +1279,11 @@ Respondé en español, claro, ejecutivo y útil.
 """
 
     response = openai_client.responses.create(
-        model=OPENAI_MODEL,
-        instructions=SYSTEM_PROMPT,
+        model=get_model_from_config(config or DEFAULT_BOT_CONFIG),
+        instructions=runtime_prompt,
         input=prompt,
         max_output_tokens=1200,
-        temperature=0.4
+        temperature=0.4,
     )
 
     return response.output_text.strip()
@@ -926,11 +1352,12 @@ def run_due_tasks():
             chat_id = task["chat_id"]
             title = task["title"]
             task_prompt = task["task_prompt"]
+            config = get_bot_config(chat_id)
 
             telegram_send_message(chat_id, f"Ejecutando tarea programada: {title}")
 
             try:
-                report = generate_task_report(task_prompt)
+                report = generate_task_report(task_prompt, config)
                 telegram_send_message(chat_id, report)
 
                 update_data = {"last_run_at": utc_iso()}
@@ -944,9 +1371,10 @@ def run_due_tasks():
 
             except Exception as e:
                 logging.error(f"Error ejecutando tarea {task['id']}: {e}")
+                log_event(chat_id, "error", f"Error ejecutando tarea {task['id']}: {e}")
                 telegram_send_message(
                     chat_id,
-                    f"No pude ejecutar la tarea #{task['id']}. Revisá logs."
+                    f"No pude ejecutar la tarea #{task['id']}. Revisá logs.",
                 )
 
     except Exception as e:
@@ -967,7 +1395,7 @@ def build_chat_input(user_text, history, semantic_memories, web_context):
 
         messages.append({
             "role": "user",
-            "content": "Recuerdos relevantes:\n" + "\n".join(memory_lines)
+            "content": "Recuerdos relevantes:\n" + "\n".join(memory_lines),
         })
 
     for m in history:
@@ -990,19 +1418,21 @@ def build_chat_input(user_text, history, semantic_memories, web_context):
     return messages
 
 
-def ask_openai_chat(input_messages):
+def ask_openai_chat(input_messages, config=None):
+    config = config or DEFAULT_BOT_CONFIG
+
     response = openai_client.responses.create(
-        model=OPENAI_MODEL,
-        instructions=SYSTEM_PROMPT,
+        model=get_model_from_config(config),
+        instructions=build_runtime_system_prompt(config),
         input=input_messages,
-        max_output_tokens=MAX_OUTPUT_TOKENS,
-        temperature=0.4
+        max_output_tokens=get_max_tokens_from_config(config),
+        temperature=0.4,
     )
 
     return response.output_text.strip() or "No pude generar una respuesta clara."
 
 
-def generate_html_from_request(user_text, semantic_memories=None):
+def generate_html_from_request(user_text, semantic_memories=None, config=None):
     memory_context = ""
 
     if semantic_memories:
@@ -1011,17 +1441,17 @@ def generate_html_from_request(user_text, semantic_memories=None):
         )
 
     response = openai_client.responses.create(
-        model=OPENAI_MODEL,
+        model=get_model_from_config(config or DEFAULT_BOT_CONFIG),
         instructions=HTML_BUILDER_PROMPT,
         input=f"Pedido del usuario:\n{user_text}{memory_context}",
         max_output_tokens=3000,
-        temperature=0.35
+        temperature=0.35,
     )
 
     return clean_html_output(response.output_text)
 
 
-def edit_html(old_html, change_request):
+def edit_html(old_html, change_request, config=None):
     prompt = f"""
 HTML actual:
 {old_html}
@@ -1033,11 +1463,11 @@ Devolvé el HTML completo actualizado.
 """
 
     response = openai_client.responses.create(
-        model=OPENAI_MODEL,
+        model=get_model_from_config(config or DEFAULT_BOT_CONFIG),
         instructions=HTML_BUILDER_PROMPT,
         input=prompt,
         max_output_tokens=3000,
-        temperature=0.3
+        temperature=0.3,
     )
 
     return clean_html_output(response.output_text)
@@ -1056,7 +1486,7 @@ async def telegram_startup_cleanup(application):
 
 
 # ---------------------------------------------------
-# BOT
+# BOT - MENSAJES NATURALES
 # ---------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1064,7 +1494,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    # Corrección directa para preguntas sobre tareas automáticas
+    config = get_bot_config(chat_id)
+
     if is_task_capability_question(user_text):
         answer = (
             "Sí, Iván. Puedo hacerlo.\n\n"
@@ -1084,14 +1515,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     semantic_memories = get_semantic_memories(chat_id, user_embedding)
     history = get_recent_history(chat_id)
-    web_context = get_web_context(user_text)
+    web_context = get_web_context(user_text, config)
 
     project_saved = None
     draft_saved = None
     task_saved = None
+    config_saved = None
 
     try:
-        if intent == "TIME_REMAINING":
+        if intent == "CONFIG_VIEW":
+            answer = format_config(config)
+
+        elif intent == "CONFIG_UPDATE":
+            changes = extract_config_changes(user_text)
+            config_saved = save_bot_config(chat_id, changes)
+
+            if config_saved:
+                new_config = get_bot_config(chat_id)
+                answer = (
+                    "Listo Iván. Actualicé mi configuración sin tocar GitHub ni Render.\n\n"
+                    "Cambios aplicados:\n"
+                    + "\n".join([f"- {k}: {v}" for k, v in config_saved.items()])
+                    + "\n\n"
+                    + format_config(new_config)
+                )
+            else:
+                answer = (
+                    "Entendí que querés cambiar mi configuración, pero no pude detectar un cambio válido.\n\n"
+                    "Ejemplos:\n"
+                    "- activá modo gerente\n"
+                    "- respondé más corto\n"
+                    "- usá tono ejecutivo\n"
+                    "- cambiá el modelo a gpt-4o-mini\n"
+                    "- desactivá web search"
+                )
+
+        elif intent == "TIME_REMAINING":
             task = get_latest_active_task(chat_id)
 
             if not task:
@@ -1104,7 +1563,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
                     if due <= now:
-                        due = due.replace(day=due.day + 1)
+                        due = due + timedelta(days=1)
 
                     answer = calculate_time_remaining(due.isoformat())
                 else:
@@ -1168,25 +1627,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif intent == "PROJECT_DRAFT_CREATE":
-            html = generate_html_from_request(user_text, semantic_memories)
+            html = generate_html_from_request(user_text, semantic_memories, config)
 
             draft_saved = create_draft(
                 chat_id,
                 trim_text(user_text, 100),
                 html,
-                user_text
+                user_text,
             )
 
             if draft_saved:
-                answer = (
-                    "Listo Iván. Te armé un primer borrador del proyecto.\n\n"
-                    "Todavía no lo publiqué como URL final.\n\n"
-                    "Podés decirme:\n"
-                    "- publicalo\n"
-                    "- cambiar colores\n"
-                    "- agregar sección de contacto\n"
-                    "- ver borrador"
-                )
+                if config.get("auto_publish_projects") == "true":
+                    project_saved = publish_draft(chat_id, draft_saved)
+                    if project_saved:
+                        answer = (
+                            f"Listo Iván. Te armé y publiqué el proyecto como #{project_saved['id']}.\n\n"
+                            f"Ver online:\n{get_project_url(project_saved['id'])}"
+                        )
+                    else:
+                        answer = "Generé el borrador, pero no pude publicarlo."
+                else:
+                    answer = (
+                        "Listo Iván. Te armé un primer borrador del proyecto.\n\n"
+                        "Todavía no lo publiqué como URL final.\n\n"
+                        "Podés decirme:\n"
+                        "- publicalo\n"
+                        "- cambiar colores\n"
+                        "- agregar sección de contacto\n"
+                        "- ver borrador"
+                    )
             else:
                 answer = "Generé el borrador, pero no pude guardarlo."
 
@@ -1196,13 +1665,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not draft:
                 answer = "No tengo un borrador activo para editar. Primero pedime que cree una página o proyecto."
             else:
-                new_html = edit_html(draft["html_content"], user_text)
+                new_html = edit_html(draft["html_content"], user_text, config)
 
                 draft_saved = update_draft(
                     chat_id,
                     draft["id"],
                     new_html,
-                    user_text
+                    user_text,
                 )
 
                 answer = (
@@ -1274,13 +1743,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_text,
                 history,
                 semantic_memories,
-                web_context
+                web_context,
             )
 
-            answer = ask_openai_chat(input_messages)
+            answer = ask_openai_chat(input_messages, config)
 
     except Exception as e:
         logging.error(f"Error procesando mensaje: {e}")
+        log_event(chat_id, "error", f"Error procesando mensaje: {e}")
         answer = "Che Iván, se me tildó la IA. Revisá logs de Render y probá de nuevo."
 
     assistant_embedding = get_openai_embedding(answer)
@@ -1295,11 +1765,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "draft_saved": draft_saved,
         "project_saved": project_saved,
         "task_saved": task_saved,
-        "model": OPENAI_MODEL
+        "config_saved": config_saved,
+        "model": get_model_from_config(config),
     })
 
     await update.message.reply_text(answer)
-
 
 
 # ---------------------------------------------------
@@ -1328,8 +1798,23 @@ def panel_home_text():
     )
 
 
-async def send_panel(update: Update, text=None):
-    await update.message.reply_text(text or panel_home_text(), reply_markup=main_menu_keyboard())
+async def send_panel(update: Update, context=None, text=None):
+    """Envía el panel tanto si viene de /start como si viene desde un callback."""
+    message_text = text or panel_home_text()
+
+    if update.message:
+        await update.message.reply_text(
+            message_text,
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            message_text,
+            reply_markup=main_menu_keyboard(),
+        )
+        return
 
 
 async def edit_panel(query, text, keyboard=None):
@@ -1341,34 +1826,49 @@ async def edit_panel(query, text, keyboard=None):
 
 async def panel_health_text(context, chat_id):
     checks = []
+
     try:
         me = await context.bot.get_me()
         checks.append(f"✔ Telegram OK: @{me.username}")
     except Exception as e:
         checks.append(f"❌ Telegram error: {e}")
         log_event(chat_id, "error", f"Health Telegram error: {e}")
+
     try:
         supabase.table("scheduled_tasks").select("id").limit(1).execute()
         checks.append("✔ Supabase OK")
     except Exception as e:
         checks.append(f"❌ Supabase error: {e}")
         log_event(chat_id, "error", f"Health Supabase error: {e}")
+
     try:
-        response = openai_client.responses.create(model=OPENAI_MODEL, instructions="Respondé solo OK.", input="healthcheck", max_output_tokens=10, temperature=0)
+        response = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            instructions="Respondé solo OK.",
+            input="healthcheck",
+            max_output_tokens=10,
+            temperature=0,
+        )
         result = response.output_text.strip()
         checks.append(f"✔ OpenAI OK: {result or 'sin texto'}")
     except Exception as e:
         checks.append(f"❌ OpenAI error: {e}")
         log_event(chat_id, "error", f"Health OpenAI error: {e}")
+
     checks.append("✔ Scheduler: proceso iniciado")
     checks.append(f"✔ Timezone: {LOCAL_TZ_NAME}")
+
     return "Healthcheck:\n\n" + "\n".join(checks)
 
 
 def panel_status_text(chat_id):
     active_tasks = count_active_tasks(chat_id)
     project_count = count_projects(chat_id)
-    recent_errors = [e for e in get_recent_events(chat_id, limit=10) if e.get("event_type") == "error"]
+    recent_errors = [
+        e for e in get_recent_events(chat_id, limit=10)
+        if e.get("event_type") == "error"
+    ]
+
     return (
         "Estado general de Bozi-bot:\n\n"
         "✔ Servicio: online\n"
@@ -1382,27 +1882,33 @@ def panel_status_text(chat_id):
     )
 
 
-def panel_models_text():
-    models = ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1", "gpt-4o"]
+def panel_models_text(chat_id=None):
+    config = get_bot_config(chat_id) if chat_id else DEFAULT_BOT_CONFIG
+    current_model = get_model_from_config(config)
+
     lines = ["Modelos disponibles para configurar:\n"]
-    for model in models:
-        current = " ← actual" if model == OPENAI_MODEL else ""
+
+    for model in sorted(ALLOWED_MODELS):
+        current = " ← actual" if model == current_model else ""
         lines.append(f"- {model}{current}")
+
     lines.append("\nPara cambiarlo, escribí por chat normal:")
     lines.append("cambiá el modelo a gpt-4o-mini")
+
     return "\n".join(lines)
 
 
-def panel_config_text():
+def panel_config_text(chat_id):
+    config = get_bot_config(chat_id)
+    base = format_config(config)
+
     return (
-        "Configuración actual:\n\n"
-        f"- Modelo principal: {OPENAI_MODEL}\n"
+        base
+        + "\n\nVariables técnicas:\n"
         f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
         f"- Historial reciente: {MAX_HISTORY_MESSAGES}\n"
         f"- Memorias semánticas: {MAX_MEMORY_RESULTS}\n"
-        f"- Máximo tokens salida: {MAX_OUTPUT_TOKENS}\n"
         f"- Embeddings activos: {USE_EMBEDDINGS}\n"
-        f"- Web search: {USE_WEB_SEARCH}\n"
         f"- Zona horaria: {LOCAL_TZ_NAME}\n"
         f"- URL pública: {PUBLIC_BASE_URL or 'no configurada'}"
     )
@@ -1410,49 +1916,66 @@ def panel_config_text():
 
 def panel_tasks_text(chat_id):
     tasks = list_tasks(chat_id)
+
     if not tasks:
         return "No tenés tareas programadas."
+
     lines = ["Tus tareas programadas:\n"]
+
     for task in tasks:
         status = "activa" if task.get("is_active") else "inactiva"
+
         if task.get("schedule_type") == "daily":
             when = f"todos los días a las {task.get('time_of_day') or '09:00'} hs"
         else:
             due_local = parse_datetime_to_local(task.get("due_at"))
             when = due_local.strftime("%d/%m/%Y %H:%M hs") if due_local else "sin horario"
+
         lines.append(f"#{task['id']} - {task['title']} | {when} | {status}")
+
     return "\n".join(lines)
 
 
 def panel_projects_text(chat_id):
     projects = list_projects(chat_id)
+
     if not projects:
         return "No tenés proyectos publicados."
+
     lines = ["Tus últimos proyectos publicados:\n"]
+
     for project in projects:
         lines.append(f"#{project['id']} - {project['title']}\n{get_project_url(project['id'])}")
+
     return "\n\n".join(lines)
 
 
 def panel_errors_text(chat_id):
     events = get_recent_events(chat_id, limit=10)
+
     if not events:
         return "No hay eventos registrados todavía."
+
     lines = ["Últimos eventos registrados:\n"]
+
     for event in events:
         created = event.get("created_at", "")
         event_type = event.get("event_type", "info")
         message = trim_text(event.get("message", ""), 180)
         lines.append(f"#{event['id']} | {created} | {event_type}\n{message}")
+
     return "\n\n".join(lines)
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     chat_id = query.message.chat_id
     data = query.data
+
     log_event(chat_id, "button", data)
+
     if data == "panel_home":
         await edit_panel(query, panel_home_text(), main_menu_keyboard())
     elif data == "panel_status":
@@ -1460,9 +1983,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "panel_health":
         await edit_panel(query, await panel_health_text(context, chat_id))
     elif data == "panel_config":
-        await edit_panel(query, panel_config_text())
+        await edit_panel(query, panel_config_text(chat_id))
     elif data == "panel_models":
-        await edit_panel(query, panel_models_text())
+        await edit_panel(query, panel_models_text(chat_id))
     elif data == "panel_tasks":
         await edit_panel(query, panel_tasks_text(chat_id))
     elif data == "panel_projects":
@@ -1478,99 +2001,61 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await edit_panel(query, "No reconozco esa opción.", main_menu_keyboard())
 
-# ---------------------------------------------------
+
 # ---------------------------------------------------
 # COMANDOS TELEGRAM
 # ---------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     log_event(chat_id, "command", "/start")
-    await send_panel(update)
+    await send_panel(update, context)
+
 
 async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    models = [
-        "gpt-4o-mini",
-        "gpt-4.1-mini",
-        "gpt-4.1",
-        "gpt-4o"
-    ]
-
-    lines = ["Modelos disponibles para configurar:\n"]
-    for model in models:
-        current = " ← actual" if model == OPENAI_MODEL else ""
-        lines.append(f"- {model}{current}")
-
-    lines.append("\nPara cambiarlo, escribí por chat normal:")
-    lines.append("cambiá el modelo a gpt-4o-mini")
-
-    await update.message.reply_text("\n".join(lines))
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(panel_models_text(chat_id))
 
 
 async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    config_text = (
-        "Configuración actual:\n\n"
-        f"- Modelo principal: {OPENAI_MODEL}\n"
-        f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
-        f"- Historial reciente: {MAX_HISTORY_MESSAGES}\n"
-        f"- Memorias semánticas: {MAX_MEMORY_RESULTS}\n"
-        f"- Máximo tokens salida: {MAX_OUTPUT_TOKENS}\n"
-        f"- Embeddings activos: {USE_EMBEDDINGS}\n"
-        f"- Web search: {USE_WEB_SEARCH}\n"
-        f"- Zona horaria: {LOCAL_TZ_NAME}\n"
-        f"- URL pública: {PUBLIC_BASE_URL or 'no configurada'}"
-    )
-
-    await update.message.reply_text(config_text)
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(panel_config_text(chat_id))
 
 
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    tasks = list_tasks(chat_id)
-
-    if not tasks:
-        await update.message.reply_text("No tenés tareas programadas.")
-        return
-
-    lines = ["Tus tareas programadas:\n"]
-
-    for task in tasks:
-        status = "activa" if task.get("is_active") else "inactiva"
-
-        if task.get("schedule_type") == "daily":
-            when = f"todos los días a las {task.get('time_of_day') or '09:00'} hs"
-        else:
-            due_local = parse_datetime_to_local(task.get("due_at"))
-            when = due_local.strftime("%d/%m/%Y %H:%M hs") if due_local else "sin horario"
-
-        lines.append(f"#{task['id']} - {task['title']} | {when} | {status}")
-
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text(panel_tasks_text(chat_id))
 
 
 async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    projects = list_projects(chat_id)
-
-    if not projects:
-        await update.message.reply_text("No tenés proyectos publicados.")
-        return
-
-    lines = ["Tus últimos proyectos publicados:\n"]
-
-    for project in projects:
-        lines.append(f"#{project['id']} - {project['title']}\n{get_project_url(project['id'])}")
-
-    await update.message.reply_text("\n\n".join(lines))
+    await update.message.reply_text(panel_projects_text(chat_id))
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Bozi-bot está online.\n\n"
-        f"Modelo: {OPENAI_MODEL}\n"
-        f"Timezone: {LOCAL_TZ_NAME}\n"
-        "Scheduler: activo\n"
-        "Telegram: polling activo"
-    )
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(panel_status_text(chat_id))
+
+
+async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(await panel_health_text(context, chat_id))
+
+
+async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(panel_errors_text(chat_id))
+
+
+async def cmd_agents(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(describe_agent_team())
+
+
+async def cmd_cost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(describe_cost_mode())
+
+
+async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(describe_mode())
 
 
 async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1578,6 +2063,7 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os._exit(0)
 
 
+# ---------------------------------------------------
 # MAIN
 # ---------------------------------------------------
 if __name__ == "__main__":
@@ -1602,15 +2088,20 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("tasks", cmd_tasks))
     application.add_handler(CommandHandler("projects", cmd_projects))
     application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("health", cmd_health))
+    application.add_handler(CommandHandler("errors", cmd_errors))
+    application.add_handler(CommandHandler("agents", cmd_agents))
+    application.add_handler(CommandHandler("cost", cmd_cost))
+    application.add_handler(CommandHandler("mode", cmd_mode))
     application.add_handler(CommandHandler("restart", cmd_restart))
 
     application.add_handler(
         MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
     )
 
-    logging.info("Bozi-bot CEO Builder Scheduler listo.")
+    logging.info("Bozi-bot CEO Builder Scheduler Panel listo.")
 
     application.run_polling(
         drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES
+        allowed_updates=Update.ALL_TYPES,
     )
