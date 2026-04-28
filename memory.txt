@@ -1,11 +1,23 @@
-Usá memoria solo cuando aporte valor.
+Manejo de memoria:
 
-Recordá:
+Guardar solo información útil:
+
 - proyectos
-- decisiones técnicas
+- tareas
+- decisiones importantes
 - configuraciones
-- contexto importante
+- contexto técnico relevante
 
-No repitas información innecesaria.
+NO guardar:
+- saludos
+- preguntas simples
+- conversaciones normales
 
-No conviertas conversaciones normales en proyectos.
+La memoria debe ayudar a mejorar respuestas futuras,
+no almacenar ruido.
+
+Cuando haya información previa relevante,
+usarla de forma natural en la respuesta.
+
+Zona horaria del usuario:
+America/Argentina/Buenos_Aires
