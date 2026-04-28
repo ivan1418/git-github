@@ -45,7 +45,8 @@ MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1000"))
 USE_EMBEDDINGS = os.getenv("USE_EMBEDDINGS", "true").lower() == "true"
 USE_WEB_SEARCH = os.getenv("USE_WEB_SEARCH", "smart").lower()
 
-LOCAL_TZ = ZoneInfo("America/Argentina/Cordoba")
+LOCAL_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+LOCAL_TZ_NAME = "America/Argentina/Buenos_Aires"
 
 if not TELEGRAM_TOKEN:
     raise ValueError("Falta TELEGRAM_TOKEN.")
@@ -167,12 +168,16 @@ CAPACIDADES REALES DEL SISTEMA:
 - Podés listar tareas y proyectos.
 - Podés actuar como gerente general ficticio si Iván lo pide.
 - Podés usar agentes ficticios internos: CTO, DevOps, Frontend, Backend, UX/UI, Blue Team, Red Team ético, Sysadmin e Infraestructura.
+- Podés ayudar con temas generales, pero tu especialidad fuerte es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización.
 
-REGLA CLAVE:
-Cuando Iván mencione agentes, equipo, contratar agentes o gerente general, interpretalo como roles ficticios internos del bot. No sugieras LinkedIn, reclutamiento ni contratación real salvo que Iván lo pida explícitamente.
-
-Nunca digas que no podés programar tareas si el usuario pide una tarea compatible.
-Si el usuario pregunta si podés hacerlo, respondé que sí y explicá brevemente cómo.
+REGLAS CRÍTICAS:
+- Cuando Iván mencione agentes, equipo, contratar agentes o gerente general, interpretalo como roles ficticios internos del bot.
+- No sugieras LinkedIn, reclutamiento ni contratación real salvo que Iván lo pida explícitamente.
+- Nunca digas que no podés programar tareas si el usuario pide una tarea compatible.
+- Si el usuario pregunta si podés hacerlo, respondé que sí y explicá brevemente cómo.
+- No inventes horarios, fechas, cuentas, tiempos restantes ni estados de tareas.
+- Para horarios usá siempre {LOCAL_TZ_NAME}.
+- Nunca respondas placeholders como "X horas y Y minutos".
 """.strip()
 
 
@@ -210,6 +215,7 @@ PROJECT_VIEW_PUBLISHED
 TASK_CREATE
 TASK_LIST
 TASK_DELETE
+TIME_REMAINING
 
 Criterios:
 CHAT_SIMPLE = charla, duda, debate, consulta, pensar juntos, preguntar si algo se puede.
@@ -222,28 +228,30 @@ PROJECT_VIEW_PUBLISHED = pide ver proyecto publicado por ID.
 TASK_CREATE = pide guardar/agendar/programar/enviar un reporte o recordatorio en el futuro o de forma recurrente.
 TASK_LIST = pide ver/listar tareas.
 TASK_DELETE = pide borrar/cancelar/desactivar tarea.
+TIME_REMAINING = pregunta cuánto falta, cuándo es, a qué hora, o cuánto tiempo queda para una tarea/horario.
 """
 
 
-TASK_EXTRACT_PROMPT = """
+TASK_EXTRACT_PROMPT = f"""
 Extraé una tarea programada desde el mensaje del usuario.
 
 Devolvé SOLO JSON válido con esta estructura:
 
-{
+{{
   "title": "título corto",
   "task_prompt": "qué debe hacer el bot cuando se ejecute",
   "schedule_type": "daily" | "once",
   "time_of_day": "HH:MM" | null,
   "due_at": "YYYY-MM-DDTHH:MM:SS-03:00" | null,
-  "timezone": "America/Argentina/Cordoba"
-}
+  "timezone": "{LOCAL_TZ_NAME}"
+}}
 
 Reglas:
+- Zona horaria principal: {LOCAL_TZ_NAME}.
 - Si dice todos los días / diariamente, schedule_type = daily.
 - Si dice mañana, una vez, hoy, o fecha específica, schedule_type = once.
 - Si no indica hora, usar 09:00.
-- Zona horaria Argentina.
+- Si el usuario dice "hoy a las 16:45", crear due_at para hoy a las 16:45 en zona horaria Argentina/Buenos Aires.
 - No agregues texto fuera del JSON.
 """
 
@@ -318,16 +326,80 @@ def telegram_send_message(chat_id, text):
 def is_task_capability_question(text):
     t = text.lower()
     return (
-        ("puedo" in t or "podés" in t or "podes" in t or "podrias" in t or "podrías" in t)
+        ("puedo" in t or "podés" in t or "podes" in t or "podria" in t or "podría" in t or "podrias" in t or "podrías" in t)
         and ("todos los días" in t or "diario" in t or "diaria" in t or "tareas" in t or "reporte" in t or "reportes" in t)
-        and ("mandes" in t or "enviarme" in t or "enviar" in t or "mandarme" in t)
+        and ("mandes" in t or "enviarme" in t or "enviar" in t or "mandarme" in t or "enviarme" in t)
     )
+
+
+def is_time_remaining_question(text):
+    t = text.lower()
+    return (
+        "cuanto falta" in t
+        or "cuánto falta" in t
+        or "cuando es" in t
+        or "cuándo es" in t
+        or "a que hora" in t
+        or "a qué hora" in t
+        or "cuanto tiempo queda" in t
+        or "cuánto tiempo queda" in t
+    )
+
+
+def parse_datetime_to_local(value):
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(LOCAL_TZ)
+    except Exception:
+        return None
+
+
+def calculate_time_remaining(due_at_str):
+    try:
+        due = parse_datetime_to_local(due_at_str)
+
+        if not due:
+            return "No pude calcular el tiempo restante porque esa tarea no tiene una fecha válida."
+
+        now = now_local()
+        diff = due - now
+
+        if diff.total_seconds() <= 0:
+            return "Ese horario ya pasó."
+
+        total_minutes = int(diff.total_seconds() // 60)
+        days = total_minutes // (24 * 60)
+        hours = (total_minutes % (24 * 60)) // 60
+        minutes = total_minutes % 60
+
+        parts = []
+
+        if days:
+            parts.append(f"{days} día{'s' if days != 1 else ''}")
+
+        if hours:
+            parts.append(f"{hours} hora{'s' if hours != 1 else ''}")
+
+        if minutes or not parts:
+            parts.append(f"{minutes} minuto{'s' if minutes != 1 else ''}")
+
+        due_txt = due.strftime("%d/%m/%Y %H:%M")
+        return f"Faltan {' y '.join(parts)}. Está programado para el {due_txt} hs, horario Argentina/Buenos Aires."
+
+    except Exception as e:
+        logging.error(f"Error calculando tiempo restante: {e}")
+        return "No pude calcular el tiempo restante."
 
 
 def classify_intent(user_text):
     lower = user_text.lower()
 
-    if any(x in lower for x in ["todos los días", "diariamente", "recordame", "agendame", "programame", "mandame un reporte", "enviame un reporte"]):
+    if is_time_remaining_question(user_text):
+        return "TIME_REMAINING"
+
+    if any(x in lower for x in ["todos los días", "diariamente", "recordame", "agendame", "programame", "mandame un reporte", "enviame un reporte", "envíame un reporte"]):
         return "TASK_CREATE"
 
     if any(x in lower for x in ["listar tareas", "ver tareas", "mis tareas", "tareas programadas"]):
@@ -357,7 +429,8 @@ def classify_intent(user_text):
             "PROJECT_VIEW_PUBLISHED",
             "TASK_CREATE",
             "TASK_LIST",
-            "TASK_DELETE"
+            "TASK_DELETE",
+            "TIME_REMAINING"
         }
 
         return intent if intent in valid else "CHAT_SIMPLE"
@@ -675,6 +748,9 @@ def parse_task(user_text):
         raw = re.sub(r"\s*```$", "", raw)
         data = json.loads(raw)
 
+        if not data.get("timezone"):
+            data["timezone"] = LOCAL_TZ_NAME
+
         if not data.get("time_of_day") and data.get("schedule_type") == "daily":
             data["time_of_day"] = "09:00"
 
@@ -688,7 +764,7 @@ def parse_task(user_text):
             "schedule_type": "daily",
             "time_of_day": "09:00",
             "due_at": None,
-            "timezone": "America/Argentina/Cordoba"
+            "timezone": LOCAL_TZ_NAME
         }
 
 
@@ -701,7 +777,7 @@ def create_scheduled_task(chat_id, task_data):
             "schedule_type": task_data.get("schedule_type", "daily"),
             "time_of_day": task_data.get("time_of_day"),
             "due_at": task_data.get("due_at"),
-            "timezone": task_data.get("timezone", "America/Argentina/Cordoba"),
+            "timezone": task_data.get("timezone", LOCAL_TZ_NAME),
             "is_active": True
         }).execute()
 
@@ -717,7 +793,7 @@ def list_tasks(chat_id):
         res = (
             supabase
             .table("scheduled_tasks")
-            .select("id, title, schedule_type, time_of_day, due_at, is_active")
+            .select("id, title, task_prompt, schedule_type, time_of_day, due_at, timezone, is_active, last_run_at, created_at")
             .eq("chat_id", chat_id)
             .order("created_at", desc=True)
             .limit(20)
@@ -729,6 +805,16 @@ def list_tasks(chat_id):
     except Exception as e:
         logging.error(f"Error listando tareas: {e}")
         return []
+
+
+def get_latest_active_task(chat_id):
+    tasks = list_tasks(chat_id)
+
+    for task in tasks:
+        if task.get("is_active"):
+            return task
+
+    return tasks[0] if tasks else None
 
 
 def delete_task(chat_id, user_text):
@@ -798,11 +884,9 @@ def is_task_due(task):
 
         if last_run:
             try:
-                last_dt = datetime.fromisoformat(
-                    last_run.replace("Z", "+00:00")
-                ).astimezone(LOCAL_TZ)
+                last_dt = parse_datetime_to_local(last_run)
 
-                if last_dt.date() == now.date():
+                if last_dt and last_dt.date() == now.date():
                     return False
 
             except Exception:
@@ -811,17 +895,14 @@ def is_task_due(task):
         return True
 
     if task.get("schedule_type") == "once" and task.get("due_at"):
-        try:
-            due = datetime.fromisoformat(
-                task["due_at"].replace("Z", "+00:00")
-            ).astimezone(LOCAL_TZ)
+        due = parse_datetime_to_local(task["due_at"])
 
-            last_run = task.get("last_run_at")
-
-            return now >= due and not last_run
-
-        except Exception:
+        if not due:
             return False
+
+        last_run = task.get("last_run_at")
+
+        return now >= due and not last_run
 
     return False
 
@@ -989,7 +1070,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Sí, Iván. Puedo hacerlo.\n\n"
             "Puedo guardar tareas programadas y enviarte reportes automáticamente por Telegram.\n\n"
             "Ejemplo:\n"
-            "Todos los días a las 9 mandame un reporte de ciberseguridad"
+            "Todos los días a las 9 mandame un reporte de ciberseguridad."
         )
 
         await update.message.reply_text(answer)
@@ -1010,7 +1091,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task_saved = None
 
     try:
-        if intent == "TASK_CREATE":
+        if intent == "TIME_REMAINING":
+            task = get_latest_active_task(chat_id)
+
+            if not task:
+                answer = "No tenés tareas programadas."
+            else:
+                if task.get("schedule_type") == "daily":
+                    time_of_day = task.get("time_of_day") or "09:00"
+                    hour, minute = map(int, time_of_day.split(":")[:2])
+                    now = now_local()
+                    due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+                    if due <= now:
+                        due = due.replace(day=due.day + 1)
+
+                    answer = calculate_time_remaining(due.isoformat())
+                else:
+                    due_at = task.get("due_at")
+                    answer = calculate_time_remaining(due_at)
+
+        elif intent == "TASK_CREATE":
             task_data = parse_task(user_text)
             task_saved = create_scheduled_task(chat_id, task_data)
 
@@ -1019,13 +1120,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     answer = (
                         f"Listo Iván. Tarea programada #{task_saved['id']}.\n\n"
                         f"{task_saved['title']}\n"
-                        f"Frecuencia: todos los días a las {task_saved.get('time_of_day') or '09:00'}."
+                        f"Frecuencia: todos los días a las {task_saved.get('time_of_day') or '09:00'} hs "
+                        f"({LOCAL_TZ_NAME})."
                     )
                 else:
+                    due_local = parse_datetime_to_local(task_saved.get("due_at"))
+                    due_txt = due_local.strftime("%d/%m/%Y %H:%M") if due_local else task_saved.get("due_at")
+
                     answer = (
                         f"Listo Iván. Tarea programada #{task_saved['id']}.\n\n"
                         f"{task_saved['title']}\n"
-                        f"Fecha: {task_saved.get('due_at')}"
+                        f"Fecha: {due_txt} hs ({LOCAL_TZ_NAME})."
                     )
             else:
                 answer = "No pude guardar la tarea. Revisá Supabase/logs."
@@ -1040,10 +1145,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 for t in tasks:
                     status = "activa" if t.get("is_active") else "inactiva"
-                    when = t.get("time_of_day") or t.get("due_at") or "sin horario"
+
+                    if t.get("schedule_type") == "daily":
+                        when = f"todos los días a las {t.get('time_of_day') or '09:00'} hs"
+                    else:
+                        due_local = parse_datetime_to_local(t.get("due_at"))
+                        when = due_local.strftime("%d/%m/%Y %H:%M hs") if due_local else "sin horario"
 
                     lines.append(
-                        f"#{t['id']} - {t['title']} | {t['schedule_type']} {when} | {status}"
+                        f"#{t['id']} - {t['title']} | {when} | {status}"
                     )
 
                 answer = "\n".join(lines)
@@ -1197,7 +1307,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     threading.Thread(target=run_web_server, daemon=True).start()
 
-    scheduler = BackgroundScheduler(timezone="America/Argentina/Cordoba")
+    scheduler = BackgroundScheduler(timezone=LOCAL_TZ_NAME)
     scheduler.add_job(run_due_tasks, "cron", second=0)
     scheduler.start()
 
