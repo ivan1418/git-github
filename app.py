@@ -10,9 +10,9 @@ from urllib.parse import urlparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 
 from supabase import create_client
 from openai import OpenAI
@@ -1055,100 +1055,6 @@ async def telegram_startup_cleanup(application):
         logging.error(f"Error limpiando Telegram al iniciar: {e}")
 
 
-
-# ---------------------------------------------------
-# EVENTOS / HEALTH / PANEL DE CONTROL
-# ---------------------------------------------------
-def log_event(chat_id=None, event_type="info", message="", metadata=None):
-    try:
-        supabase.table("bot_events").insert({
-            "chat_id": chat_id,
-            "event_type": event_type,
-            "message": trim_text(message, 1000),
-            "metadata": metadata or {},
-            "created_at": utc_iso()
-        }).execute()
-    except Exception as e:
-        logging.warning(f"No pude guardar evento: {e}")
-
-
-def get_recent_events(chat_id=None, limit=10):
-    try:
-        query = (
-            supabase
-            .table("bot_events")
-            .select("id, chat_id, event_type, message, metadata, created_at")
-            .order("created_at", desc=True)
-            .limit(limit)
-        )
-
-        if chat_id is not None:
-            query = query.eq("chat_id", chat_id)
-
-        res = query.execute()
-        return res.data or []
-    except Exception as e:
-        logging.warning(f"No pude leer eventos: {e}")
-        return []
-
-
-def count_active_tasks(chat_id):
-    try:
-        tasks = list_tasks(chat_id)
-        return len([t for t in tasks if t.get("is_active")])
-    except Exception:
-        return 0
-
-
-def count_projects(chat_id):
-    try:
-        return len(list_projects(chat_id, limit=100))
-    except Exception:
-        return 0
-
-
-def describe_agent_team():
-    return (
-        "Equipo ficticio interno disponible:\n\n"
-        "- CEO / Gerente general: coordina prioridades y decisiones.\n"
-        "- CTO: arquitectura, stack y calidad técnica.\n"
-        "- Backend Developer: APIs, bots, lógica y bases de datos.\n"
-        "- Frontend Developer: interfaces, HTML/CSS/JS y experiencia visual.\n"
-        "- DevOps: Render, Docker, deploys, logs y estabilidad.\n"
-        "- UX/UI: diseño, claridad visual y usabilidad.\n"
-        "- Blue Team: defensa, monitoreo, hardening y detección.\n"
-        "- Red Team ético: pruebas autorizadas y análisis ofensivo responsable.\n"
-        "- Sysadmin / Infraestructura: Linux, redes, servicios y troubleshooting.\n\n"
-        "Son roles simulados internos del bot, no personas reales contratadas."
-    )
-
-
-def describe_cost_mode():
-    return (
-        "Modo costo actual:\n\n"
-        f"- Modelo principal: {OPENAI_MODEL}\n"
-        f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
-        f"- Historial reciente: {MAX_HISTORY_MESSAGES} mensajes\n"
-        f"- Memorias semánticas: {MAX_MEMORY_RESULTS} resultados\n"
-        f"- Máximo tokens salida: {MAX_OUTPUT_TOKENS}\n"
-        f"- Búsqueda web: {USE_WEB_SEARCH}\n\n"
-        "Recomendación: mantener gpt-4o-mini para uso diario y subir modelo solo para tareas complejas."
-    )
-
-
-def describe_mode():
-    return (
-        "Modo operativo actual:\n\n"
-        "- Conversación natural: activo\n"
-        "- Proyectos con borrador primero: activo\n"
-        "- Publicación por URL: activo\n"
-        "- Tareas programadas: activo\n"
-        "- Memoria semántica: activo si USE_EMBEDDINGS=true\n"
-        "- Equipo ficticio de agentes: disponible bajo pedido\n"
-        f"- Zona horaria: {LOCAL_TZ_NAME}"
-    )
-
-
 # ---------------------------------------------------
 # BOT
 # ---------------------------------------------------
@@ -1375,7 +1281,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logging.error(f"Error procesando mensaje: {e}")
-        log_event(chat_id, "error", f"Error procesando mensaje: {e}", {"user_text": user_text})
         answer = "Che Iván, se me tildó la IA. Revisá logs de Render y probá de nuevo."
 
     assistant_embedding = get_openai_embedding(answer)
@@ -1396,6 +1301,183 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(answer)
 
 
+
+# ---------------------------------------------------
+# PANEL CON BOTONES TELEGRAM
+# ---------------------------------------------------
+def main_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Estado", callback_data="panel_status"), InlineKeyboardButton("🩺 Health", callback_data="panel_health")],
+        [InlineKeyboardButton("🧠 Config", callback_data="panel_config"), InlineKeyboardButton("🤖 Modelos", callback_data="panel_models")],
+        [InlineKeyboardButton("📅 Tareas", callback_data="panel_tasks"), InlineKeyboardButton("🚀 Proyectos", callback_data="panel_projects")],
+        [InlineKeyboardButton("👥 Agentes", callback_data="panel_agents"), InlineKeyboardButton("💰 Costo", callback_data="panel_cost")],
+        [InlineKeyboardButton("⚙️ Modo", callback_data="panel_mode"), InlineKeyboardButton("🧾 Errores", callback_data="panel_errors")],
+    ])
+
+
+def back_menu_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Volver al panel", callback_data="panel_home")]])
+
+
+def panel_home_text():
+    return (
+        "Panel de control de Bozi-bot\n\n"
+        "Podés usar estos botones o hablarme normalmente.\n\n"
+        "Comandos disponibles:\n"
+        "/models /config /tasks /projects /status /health /errors /agents /cost /mode /restart"
+    )
+
+
+async def send_panel(update: Update, text=None):
+    await update.message.reply_text(text or panel_home_text(), reply_markup=main_menu_keyboard())
+
+
+async def edit_panel(query, text, keyboard=None):
+    try:
+        await query.edit_message_text(text, reply_markup=keyboard or back_menu_keyboard())
+    except Exception:
+        await query.message.reply_text(text, reply_markup=keyboard or back_menu_keyboard())
+
+
+async def panel_health_text(context, chat_id):
+    checks = []
+    try:
+        me = await context.bot.get_me()
+        checks.append(f"✔ Telegram OK: @{me.username}")
+    except Exception as e:
+        checks.append(f"❌ Telegram error: {e}")
+        log_event(chat_id, "error", f"Health Telegram error: {e}")
+    try:
+        supabase.table("scheduled_tasks").select("id").limit(1).execute()
+        checks.append("✔ Supabase OK")
+    except Exception as e:
+        checks.append(f"❌ Supabase error: {e}")
+        log_event(chat_id, "error", f"Health Supabase error: {e}")
+    try:
+        response = openai_client.responses.create(model=OPENAI_MODEL, instructions="Respondé solo OK.", input="healthcheck", max_output_tokens=10, temperature=0)
+        result = response.output_text.strip()
+        checks.append(f"✔ OpenAI OK: {result or 'sin texto'}")
+    except Exception as e:
+        checks.append(f"❌ OpenAI error: {e}")
+        log_event(chat_id, "error", f"Health OpenAI error: {e}")
+    checks.append("✔ Scheduler: proceso iniciado")
+    checks.append(f"✔ Timezone: {LOCAL_TZ_NAME}")
+    return "Healthcheck:\n\n" + "\n".join(checks)
+
+
+def panel_status_text(chat_id):
+    active_tasks = count_active_tasks(chat_id)
+    project_count = count_projects(chat_id)
+    recent_errors = [e for e in get_recent_events(chat_id, limit=10) if e.get("event_type") == "error"]
+    return (
+        "Estado general de Bozi-bot:\n\n"
+        "✔ Servicio: online\n"
+        "✔ Telegram: polling activo\n"
+        "✔ Scheduler: activo\n"
+        f"✔ Modelo: {OPENAI_MODEL}\n"
+        f"✔ Timezone: {LOCAL_TZ_NAME}\n"
+        f"✔ Tareas activas: {active_tasks}\n"
+        f"✔ Proyectos publicados: {project_count}\n"
+        f"✔ Últimos errores registrados: {len(recent_errors)}"
+    )
+
+
+def panel_models_text():
+    models = ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1", "gpt-4o"]
+    lines = ["Modelos disponibles para configurar:\n"]
+    for model in models:
+        current = " ← actual" if model == OPENAI_MODEL else ""
+        lines.append(f"- {model}{current}")
+    lines.append("\nPara cambiarlo, escribí por chat normal:")
+    lines.append("cambiá el modelo a gpt-4o-mini")
+    return "\n".join(lines)
+
+
+def panel_config_text():
+    return (
+        "Configuración actual:\n\n"
+        f"- Modelo principal: {OPENAI_MODEL}\n"
+        f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
+        f"- Historial reciente: {MAX_HISTORY_MESSAGES}\n"
+        f"- Memorias semánticas: {MAX_MEMORY_RESULTS}\n"
+        f"- Máximo tokens salida: {MAX_OUTPUT_TOKENS}\n"
+        f"- Embeddings activos: {USE_EMBEDDINGS}\n"
+        f"- Web search: {USE_WEB_SEARCH}\n"
+        f"- Zona horaria: {LOCAL_TZ_NAME}\n"
+        f"- URL pública: {PUBLIC_BASE_URL or 'no configurada'}"
+    )
+
+
+def panel_tasks_text(chat_id):
+    tasks = list_tasks(chat_id)
+    if not tasks:
+        return "No tenés tareas programadas."
+    lines = ["Tus tareas programadas:\n"]
+    for task in tasks:
+        status = "activa" if task.get("is_active") else "inactiva"
+        if task.get("schedule_type") == "daily":
+            when = f"todos los días a las {task.get('time_of_day') or '09:00'} hs"
+        else:
+            due_local = parse_datetime_to_local(task.get("due_at"))
+            when = due_local.strftime("%d/%m/%Y %H:%M hs") if due_local else "sin horario"
+        lines.append(f"#{task['id']} - {task['title']} | {when} | {status}")
+    return "\n".join(lines)
+
+
+def panel_projects_text(chat_id):
+    projects = list_projects(chat_id)
+    if not projects:
+        return "No tenés proyectos publicados."
+    lines = ["Tus últimos proyectos publicados:\n"]
+    for project in projects:
+        lines.append(f"#{project['id']} - {project['title']}\n{get_project_url(project['id'])}")
+    return "\n\n".join(lines)
+
+
+def panel_errors_text(chat_id):
+    events = get_recent_events(chat_id, limit=10)
+    if not events:
+        return "No hay eventos registrados todavía."
+    lines = ["Últimos eventos registrados:\n"]
+    for event in events:
+        created = event.get("created_at", "")
+        event_type = event.get("event_type", "info")
+        message = trim_text(event.get("message", ""), 180)
+        lines.append(f"#{event['id']} | {created} | {event_type}\n{message}")
+    return "\n\n".join(lines)
+
+
+async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    data = query.data
+    log_event(chat_id, "button", data)
+    if data == "panel_home":
+        await edit_panel(query, panel_home_text(), main_menu_keyboard())
+    elif data == "panel_status":
+        await edit_panel(query, panel_status_text(chat_id))
+    elif data == "panel_health":
+        await edit_panel(query, await panel_health_text(context, chat_id))
+    elif data == "panel_config":
+        await edit_panel(query, panel_config_text())
+    elif data == "panel_models":
+        await edit_panel(query, panel_models_text())
+    elif data == "panel_tasks":
+        await edit_panel(query, panel_tasks_text(chat_id))
+    elif data == "panel_projects":
+        await edit_panel(query, panel_projects_text(chat_id))
+    elif data == "panel_agents":
+        await edit_panel(query, describe_agent_team())
+    elif data == "panel_cost":
+        await edit_panel(query, describe_cost_mode())
+    elif data == "panel_mode":
+        await edit_panel(query, describe_mode())
+    elif data == "panel_errors":
+        await edit_panel(query, panel_errors_text(chat_id))
+    else:
+        await edit_panel(query, "No reconozco esa opción.", main_menu_keyboard())
+
 # ---------------------------------------------------
 # ---------------------------------------------------
 # COMANDOS TELEGRAM
@@ -1403,26 +1485,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     log_event(chat_id, "command", "/start")
-    await update.message.reply_text(
-        "Hola Iván. Soy Bozi-bot.\n\n"
-        "Podés hablarme normalmente o usar comandos rápidos:\n\n"
-        "/models - ver modelos disponibles\n"
-        "/config - ver configuración actual\n"
-        "/tasks - ver tareas programadas\n"
-        "/projects - ver proyectos publicados\n"
-        "/status - estado general\n"
-        "/health - test OpenAI + Supabase + Telegram\n"
-        "/errors - últimos eventos/errores\n"
-        "/agents - equipo ficticio interno\n"
-        "/cost - modo costo actual\n"
-        "/mode - modo operativo actual\n"
-        "/restart - reiniciar el servicio en Render"
-    )
-
+    await send_panel(update)
 
 async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/models")
     models = [
         "gpt-4o-mini",
         "gpt-4.1-mini",
@@ -1442,8 +1507,6 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/config")
     config_text = (
         "Configuración actual:\n\n"
         f"- Modelo principal: {OPENAI_MODEL}\n"
@@ -1462,7 +1525,6 @@ async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/tasks")
     tasks = list_tasks(chat_id)
 
     if not tasks:
@@ -1487,7 +1549,6 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/projects")
     projects = list_projects(chat_id)
 
     if not projects:
@@ -1503,105 +1564,16 @@ async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/status")
-    active_tasks = count_active_tasks(chat_id)
-    project_count = count_projects(chat_id)
-    recent_errors = [e for e in get_recent_events(chat_id, limit=10) if e.get("event_type") == "error"]
-
     await update.message.reply_text(
-        "Estado general de Bozi-bot:\n\n"
-        "✔ Servicio: online\n"
-        "✔ Telegram: polling activo\n"
-        "✔ Scheduler: activo\n"
-        f"✔ Modelo: {OPENAI_MODEL}\n"
-        f"✔ Timezone: {LOCAL_TZ_NAME}\n"
-        f"✔ Tareas activas: {active_tasks}\n"
-        f"✔ Proyectos publicados: {project_count}\n"
-        f"✔ Últimos errores registrados: {len(recent_errors)}"
+        "Bozi-bot está online.\n\n"
+        f"Modelo: {OPENAI_MODEL}\n"
+        f"Timezone: {LOCAL_TZ_NAME}\n"
+        "Scheduler: activo\n"
+        "Telegram: polling activo"
     )
 
 
-async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/health")
-
-    checks = []
-
-    try:
-        me = await context.bot.get_me()
-        checks.append(f"✔ Telegram OK: @{me.username}")
-    except Exception as e:
-        checks.append(f"❌ Telegram error: {e}")
-        log_event(chat_id, "error", f"Health Telegram error: {e}")
-
-    try:
-        supabase.table("scheduled_tasks").select("id").limit(1).execute()
-        checks.append("✔ Supabase OK")
-    except Exception as e:
-        checks.append(f"❌ Supabase error: {e}")
-        log_event(chat_id, "error", f"Health Supabase error: {e}")
-
-    try:
-        response = openai_client.responses.create(
-            model=OPENAI_MODEL,
-            instructions="Respondé solo OK.",
-            input="healthcheck",
-            max_output_tokens=10,
-            temperature=0
-        )
-        result = response.output_text.strip()
-        checks.append(f"✔ OpenAI OK: {result or 'sin texto'}")
-    except Exception as e:
-        checks.append(f"❌ OpenAI error: {e}")
-        log_event(chat_id, "error", f"Health OpenAI error: {e}")
-
-    checks.append("✔ Scheduler: proceso iniciado")
-    checks.append(f"✔ Timezone: {LOCAL_TZ_NAME}")
-
-    await update.message.reply_text("Healthcheck:\n\n" + "\n".join(checks))
-
-
-async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/errors")
-    events = get_recent_events(chat_id, limit=10)
-
-    if not events:
-        await update.message.reply_text("No hay eventos registrados todavía.")
-        return
-
-    lines = ["Últimos eventos registrados:\n"]
-    for event in events:
-        created = event.get("created_at", "")
-        event_type = event.get("event_type", "info")
-        message = trim_text(event.get("message", ""), 180)
-        lines.append(f"#{event['id']} | {created} | {event_type}\n{message}")
-
-    await update.message.reply_text("\n\n".join(lines))
-
-
-async def cmd_agents(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/agents")
-    await update.message.reply_text(describe_agent_team())
-
-
-async def cmd_cost(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/cost")
-    await update.message.reply_text(describe_cost_mode())
-
-
-async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/mode")
-    await update.message.reply_text(describe_mode())
-
-
 async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    log_event(chat_id, "command", "/restart")
     await update.message.reply_text("Reiniciando servicio en Render...")
     os._exit(0)
 
@@ -1614,7 +1586,6 @@ if __name__ == "__main__":
     scheduler = BackgroundScheduler(timezone=LOCAL_TZ_NAME)
     scheduler.add_job(run_due_tasks, "cron", second=0)
     scheduler.start()
-    log_event(None, "startup", "Bozi-bot iniciado correctamente", {"model": OPENAI_MODEL, "timezone": LOCAL_TZ_NAME})
 
     application = (
         ApplicationBuilder()
@@ -1623,17 +1594,14 @@ if __name__ == "__main__":
         .build()
     )
 
+    application.add_handler(CallbackQueryHandler(handle_button))
+
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("models", cmd_models))
     application.add_handler(CommandHandler("config", cmd_config))
     application.add_handler(CommandHandler("tasks", cmd_tasks))
     application.add_handler(CommandHandler("projects", cmd_projects))
     application.add_handler(CommandHandler("status", cmd_status))
-    application.add_handler(CommandHandler("health", cmd_health))
-    application.add_handler(CommandHandler("errors", cmd_errors))
-    application.add_handler(CommandHandler("agents", cmd_agents))
-    application.add_handler(CommandHandler("cost", cmd_cost))
-    application.add_handler(CommandHandler("mode", cmd_mode))
     application.add_handler(CommandHandler("restart", cmd_restart))
 
     application.add_handler(
