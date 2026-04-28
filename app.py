@@ -133,14 +133,20 @@ def trim_text(text, max_chars=1200):
 
 def send_to_webhook(data):
     if not WEBHOOK_DEBUG_URL:
+        logging.info("WEBHOOK_DEBUG_URL no configurada. No se envía a Webhook.site.")
         return
 
     try:
-        requests.post(
+        logging.info(f"Enviando POST a Webhook.site: {WEBHOOK_DEBUG_URL}")
+
+        response = requests.post(
             WEBHOOK_DEBUG_URL,
             json=data,
-            timeout=5
+            timeout=8
         )
+
+        logging.info(f"Webhook.site respondió HTTP {response.status_code}")
+
     except Exception as e:
         logging.error(f"Error enviando a Webhook.site: {e}")
 
@@ -382,7 +388,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         embedding=assistant_embedding
     )
 
-    send_to_webhook({
+    webhook_payload = {
         "type": "bot_project_output",
         "chat_id": chat_id,
         "user_message": user_text,
@@ -390,7 +396,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "semantic_memories_used": semantic_memories,
         "web_context_used": web_context,
         "model": OPENAI_MODEL
-    })
+    }
+
+    send_to_webhook(webhook_payload)
 
     await update.message.reply_text(answer)
 
