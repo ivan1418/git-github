@@ -19,7 +19,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bozi-bot is online with semantic memory and webhook output!")
+        self.wfile.write(b"Bozi-bot online with projects, semantic memory and webhook!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -51,7 +51,7 @@ OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-s
 
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "4"))
 MAX_MEMORY_RESULTS = int(os.getenv("MAX_MEMORY_RESULTS", "6"))
-MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "450"))
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "650"))
 
 USE_EMBEDDINGS = os.getenv("USE_EMBEDDINGS", "true").lower() == "true"
 USE_WEB_SEARCH = os.getenv("USE_WEB_SEARCH", "smart").lower()
@@ -112,13 +112,15 @@ SYSTEM_PROMPT = f"""
 
 {MEMORY_PROMPT}
 
-REGLA EXTRA:
-Cuando recibas recuerdos antiguos desde Supabase, usalos solo si son relevantes para la consulta actual.
-No menciones que usás Supabase salvo que el usuario lo pregunte.
+REGLAS EXTRA:
+- Cuando recibas recuerdos antiguos desde Supabase, usalos solo si son relevantes.
+- No menciones Supabase salvo que el usuario lo pregunte.
+- Si el usuario pide crear, armar, generar, diseñar, configurar o documentar algo, tratá esa respuesta como posible proyecto.
+- Si generás código, configuración, guía técnica o arquitectura, hacelo listo para usar.
 """.strip()
 
 
-# --- 4. UTILIDADES ---
+# --- 4. UTILIDADES GENERALES ---
 def trim_text(text, max_chars=1200):
     if not text:
         return ""
@@ -169,6 +171,35 @@ def should_search_web(text: str) -> bool:
     return any(k in text_lower for k in keywords)
 
 
+def is_project_request(text: str, answer: str = "") -> bool:
+    text_lower = text.lower()
+    answer_lower = answer.lower()
+
+    trigger_words = [
+        "proyecto", "crear", "armar", "generar", "desarrollar", "diseñar",
+        "configurar", "automatizar", "script", "codigo", "código",
+        "dockerfile", "app.py", "requirements", "bot", "api", "webhook",
+        "documentar", "pasame completo", "archivo completo"
+    ]
+
+    answer_indicators = [
+        "```", "dockerfile", "requirements.txt", "app.py",
+        "paso 1", "paso 2", "configuración", "script"
+    ]
+
+    return any(w in text_lower for w in trigger_words) or any(w in answer_lower for w in answer_indicators)
+
+
+def extract_project_title(user_text: str):
+    title = trim_text(user_text, 80)
+
+    if not title:
+        return "Proyecto generado por Bozi-bot"
+
+    return title
+
+
+# --- 5. MEMORIA SEMÁNTICA ---
 def get_openai_embedding(text):
     if not USE_EMBEDDINGS:
         return None
@@ -252,6 +283,96 @@ def get_semantic_memories(chat_id, query_embedding):
         return []
 
 
+# --- 6. PROYECTOS ---
+def save_project(chat_id, title, content, source_message):
+    try:
+        res = (
+            supabase
+            .table("projects")
+            .insert({
+                "chat_id": chat_id,
+                "title": trim_text(title, 150),
+                "content": trim_text(content, 20000),
+                "source_message": trim_text(source_message, 3000)
+            })
+            .execute()
+        )
+
+        if res.data and len(res.data) > 0:
+            return res.data[0]
+
+        return None
+
+    except Exception as e:
+        logging.error(f"Error guardando proyecto en Supabase: {e}")
+        return None
+
+
+def list_projects(chat_id, limit=10):
+    try:
+        res = (
+            supabase
+            .table("projects")
+            .select("id, title, created_at")
+            .eq("chat_id", chat_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+
+        return res.data or []
+
+    except Exception as e:
+        logging.error(f"Error listando proyectos: {e}")
+        return []
+
+
+def get_project(chat_id, project_id):
+    try:
+        res = (
+            supabase
+            .table("projects")
+            .select("id, title, content, source_message, created_at, updated_at")
+            .eq("chat_id", chat_id)
+            .eq("id", project_id)
+            .limit(1)
+            .execute()
+        )
+
+        if res.data:
+            return res.data[0]
+
+        return None
+
+    except Exception as e:
+        logging.error(f"Error obteniendo proyecto: {e}")
+        return None
+
+
+def update_project(chat_id, project_id, new_content):
+    try:
+        res = (
+            supabase
+            .table("projects")
+            .update({
+                "content": trim_text(new_content, 20000)
+            })
+            .eq("chat_id", chat_id)
+            .eq("id", project_id)
+            .execute()
+        )
+
+        if res.data:
+            return res.data[0]
+
+        return None
+
+    except Exception as e:
+        logging.error(f"Error actualizando proyecto: {e}")
+        return None
+
+
+# --- 7. BÚSQUEDA WEB ---
 def get_web_context(user_text):
     if not tavily_client:
         return ""
@@ -284,7 +405,8 @@ def get_web_context(user_text):
         return ""
 
 
-def build_openai_input(user_text, history, semantic_memories, web_context):
+# --- 8. ARMADO DE INPUT PARA OPENAI ---
+def build_openai_input(user_text, history, semantic_memories, web_context, project_context=""):
     messages = []
 
     if semantic_memories:
@@ -303,6 +425,12 @@ def build_openai_input(user_text, history, semantic_memories, web_context):
         messages.append({
             "role": "user",
             "content": "Recuerdos relevantes de conversaciones anteriores:\n" + "\n".join(memory_lines)
+        })
+
+    if project_context:
+        messages.append({
+            "role": "user",
+            "content": project_context
         })
 
     for m in history:
@@ -331,7 +459,70 @@ def build_openai_input(user_text, history, semantic_memories, web_context):
     return messages
 
 
-# --- 5. LÓGICA DEL BOT ---
+def ask_openai(input_messages):
+    response = openai_client.responses.create(
+        model=OPENAI_MODEL,
+        instructions=SYSTEM_PROMPT,
+        input=input_messages,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        temperature=0.4
+    )
+
+    answer = response.output_text.strip()
+
+    if not answer:
+        answer = "No pude generar una respuesta clara. Probá reformulando la consulta."
+
+    return answer
+
+
+# --- 9. COMANDOS SIMPLES POR TEXTO ---
+async def handle_project_commands(chat_id, user_text, update):
+    text = user_text.strip().lower()
+
+    if text in ["/proyectos", "proyectos", "listar proyectos", "mis proyectos"]:
+        projects = list_projects(chat_id)
+
+        if not projects:
+            await update.message.reply_text("Todavía no tengo proyectos guardados.")
+            return True
+
+        lines = ["Tus últimos proyectos guardados:\n"]
+
+        for p in projects:
+            lines.append(f"#{p['id']} - {p['title']}")
+
+        lines.append("\nPara ver uno: ver proyecto 12")
+        await update.message.reply_text("\n".join(lines))
+        return True
+
+    if text.startswith("ver proyecto "):
+        try:
+            project_id = int(text.replace("ver proyecto ", "").strip())
+        except ValueError:
+            await update.message.reply_text("Usá el formato: ver proyecto 12")
+            return True
+
+        project = get_project(chat_id, project_id)
+
+        if not project:
+            await update.message.reply_text("No encontré ese proyecto.")
+            return True
+
+        content = project["content"]
+
+        if len(content) > 3500:
+            content = content[:3500] + "\n\n...contenido recortado por límite de Telegram."
+
+        await update.message.reply_text(
+            f"Proyecto #{project['id']} - {project['title']}\n\n{content}"
+        )
+        return True
+
+    return False
+
+
+# --- 10. LÓGICA PRINCIPAL DEL BOT ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text or ""
@@ -340,6 +531,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=chat_id,
         action=ChatAction.TYPING
     )
+
+    command_handled = await handle_project_commands(chat_id, user_text, update)
+
+    if command_handled:
+        return
 
     user_embedding = get_openai_embedding(user_text)
 
@@ -362,18 +558,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        response = openai_client.responses.create(
-            model=OPENAI_MODEL,
-            instructions=SYSTEM_PROMPT,
-            input=input_messages,
-            max_output_tokens=MAX_OUTPUT_TOKENS,
-            temperature=0.4
-        )
-
-        answer = response.output_text.strip()
-
-        if not answer:
-            answer = "No pude generar una respuesta clara. Probá reformulando la consulta."
+        answer = ask_openai(input_messages)
 
     except Exception as e:
         logging.error(f"Error en OpenAI: {e}")
@@ -388,11 +573,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         embedding=assistant_embedding
     )
 
+    project_saved = None
+
+    if is_project_request(user_text, answer):
+        project_title = extract_project_title(user_text)
+
+        project_saved = save_project(
+            chat_id=chat_id,
+            title=project_title,
+            content=answer,
+            source_message=user_text
+        )
+
+        if project_saved:
+            answer += f"\n\nProyecto guardado como #{project_saved['id']}."
+            answer += "\nPara verlo después: ver proyecto " + str(project_saved["id"])
+
     webhook_payload = {
         "type": "bot_project_output",
         "chat_id": chat_id,
         "user_message": user_text,
         "bot_response": answer,
+        "project_saved": project_saved,
         "semantic_memories_used": semantic_memories,
         "web_context_used": web_context,
         "model": OPENAI_MODEL
@@ -403,7 +605,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(answer)
 
 
-# --- 6. EJECUCIÓN ---
+# --- 11. EJECUCIÓN ---
 if __name__ == "__main__":
     threading.Thread(target=run_health_check, daemon=True).start()
 
@@ -413,6 +615,6 @@ if __name__ == "__main__":
         MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
     )
 
-    logging.info("Bozi-bot con OpenAI + Supabase + Webhook.site listo.")
+    logging.info("Bozi-bot con OpenAI + Supabase + Webhook.site + Projects listo.")
 
     application.run_polling(drop_pending_updates=True)
