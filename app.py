@@ -653,7 +653,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
 # 🔥 CORRECCIÓN PARA QUE NO DIGA "NO PUEDO"
-if is_task_capability_question(user_text):
+    if is_task_capability_question(user_text):
     answer = (
         "Sí, Iván. Puedo hacerlo.\n\n"
         "Puedo guardar tareas programadas y enviarte reportes automáticamente por Telegram.\n\n"
