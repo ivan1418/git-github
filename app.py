@@ -2031,7 +2031,7 @@ def build_diagnostic_text(chat_id):
 
     if config.get("detail_level") != "alto":
         score -= 8
-        suggestions.append("Subir nivel de detalle a alto si querés análisis más completos.")
+        suggestions.append("Subir nivel de detalle a alto para diagnósticos y respuestas más completos.")
 
     if max_tokens < 1000:
         score -= 10
@@ -2053,6 +2053,8 @@ def build_diagnostic_text(chat_id):
 
     if not projects:
         suggestions.append("Crear y publicar un proyecto de prueba para validar el flujo completo de desarrollo.")
+    else:
+        suggestions.append("Revisar los proyectos publicados y elegir uno para evolucionarlo como proyecto principal.")
 
     if recent_errors:
         score -= min(20, len(recent_errors) * 5)
@@ -2066,42 +2068,81 @@ def build_diagnostic_text(chat_id):
 
     score = max(0, min(score, 100))
 
+    if score >= 90:
+        status = "🟢 Excelente"
+    elif score >= 75:
+        status = "🟡 Bueno"
+    elif score >= 60:
+        status = "🟠 Mejorable"
+    else:
+        status = "🔴 Requiere atención"
+
     lines = [
-        "🧠 Diagnóstico general de Bozi-bot",
+        "╔══════════════════════╗",
+        "🧠 DIAGNÓSTICO BOZI-BOT",
+        "╚══════════════════════╝",
         "",
-        f"Puntaje estimado: {score}/100",
+        f"📊 Estado general: {status}",
+        f"🎯 Puntaje estimado: {score}/100",
         "",
-        "Configuración:",
-        f"- Modo: {config.get('mode')}",
-        f"- Nivel de detalle: {config.get('detail_level')}",
-        f"- Modelo: {config.get('model')}",
-        f"- Max tokens: {config.get('max_output_tokens')}",
-        f"- Web search: {config.get('web_search')}",
-        f"- Historial reciente: {MAX_HISTORY_MESSAGES}",
-        f"- Memorias semánticas: {MAX_MEMORY_RESULTS}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "⚙️ CONFIGURACIÓN",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"• Modo: {config.get('mode')}",
+        f"• Nivel de detalle: {config.get('detail_level')}",
+        f"• Profundidad técnica: {config.get('technical_depth')}",
+        f"• Modelo: {config.get('model')}",
+        f"• Max tokens: {config.get('max_output_tokens')}",
+        f"• Web search: {config.get('web_search')}",
+        f"• Historial reciente: {MAX_HISTORY_MESSAGES}",
+        f"• Memorias semánticas: {MAX_MEMORY_RESULTS}",
         "",
-        "Tareas:",
-        f"- {len(tasks)} totales / {len(active_tasks)} activas",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "📅 TAREAS",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"• Total: {len(tasks)}",
+        f"• Activas: {len(active_tasks)}",
+        f"• Inactivas: {max(0, len(tasks) - len(active_tasks))}",
         "",
-        "Proyectos:",
-        f"- {len(projects)} publicados",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "🚀 PROYECTOS",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"• Publicados: {len(projects)}",
+        f"• URL pública: {PUBLIC_BASE_URL or 'no configurada'}",
         "",
-        "Errores:",
-        f"- {len(recent_errors)} errores recientes",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "🧾 ERRORES",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"• Errores recientes: {len(recent_errors)}",
+        "• Estado: sin alertas críticas" if not recent_errors else "• Estado: revisar últimos errores",
         "",
-        "Sugerencias accionables:",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "💡 SUGERENCIAS ACCIONABLES",
+        "━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
     for i, suggestion in enumerate(suggestions[:6], start=1):
         lines.append(f"{i}. {suggestion}")
 
-    lines.append("")
-    lines.append("Para aplicar cambios, escribime una orden natural. Ejemplos:")
-    lines.append("- cambiá max_output_tokens a 1200")
-    lines.append("- activá modo gerente")
-    lines.append("- creá una tarea diaria de reporte de ciberseguridad")
+    lines.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "🛠 ACCIONES RÁPIDAS",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "Copiá y enviá una de estas órdenes:",
+        "",
+        "• cambiá max_output_tokens a 1200",
+        "• activá modo gerente",
+        "• respondé más completo",
+        "• creá una tarea diaria de reporte de ciberseguridad",
+        "• ver tareas",
+        "• ver proyectos",
+        "",
+        "✅ Recomendación:",
+        "Usá este diagnóstico después de cambios grandes o cuando algo no funcione como esperás."
+    ])
 
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def panel_errors_text(chat_id):
