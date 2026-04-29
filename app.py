@@ -1839,6 +1839,7 @@ def main_menu_keyboard():
         [InlineKeyboardButton("📅 Tareas", callback_data="panel_tasks"), InlineKeyboardButton("🚀 Proyectos", callback_data="panel_projects")],
         [InlineKeyboardButton("👥 Agentes", callback_data="panel_agents"), InlineKeyboardButton("💰 Costo", callback_data="panel_cost")],
         [InlineKeyboardButton("⚙️ Modo", callback_data="panel_mode"), InlineKeyboardButton("🧾 Errores", callback_data="panel_errors")],
+        [InlineKeyboardButton("🧠 Diagnóstico", callback_data="panel_diagnostico")],
     ])
 
 
@@ -1851,7 +1852,7 @@ def panel_home_text():
         "Panel de control de Bozi-bot\n\n"
         "Podés usar estos botones o hablarme normalmente.\n\n"
         "Comandos disponibles:\n"
-        "/models /config /tasks /projects /status /health /errors /agents /cost /mode /restart"
+        "/models /config /tasks /projects /status /health /errors /agents /cost /mode /diagnostico /restart"
     )
 
 
@@ -2007,6 +2008,102 @@ def panel_projects_text(chat_id):
     return "\n\n".join(lines)
 
 
+def build_diagnostic_text(chat_id):
+    config = get_bot_config(chat_id)
+    tasks = list_tasks(chat_id)
+    projects = list_projects(chat_id)
+    events = get_recent_events(chat_id, limit=15)
+
+    active_tasks = [t for t in tasks if t.get("is_active")]
+    recent_errors = [e for e in events if e.get("event_type") == "error"]
+
+    try:
+        max_tokens = int(config.get("max_output_tokens", MAX_OUTPUT_TOKENS))
+    except Exception:
+        max_tokens = MAX_OUTPUT_TOKENS
+
+    score = 100
+    suggestions = []
+
+    if config.get("mode") != "gerente_general":
+        score -= 10
+        suggestions.append("Activar modo gerente_general para respuestas más estratégicas.")
+
+    if config.get("detail_level") != "alto":
+        score -= 8
+        suggestions.append("Subir nivel de detalle a alto si querés análisis más completos.")
+
+    if max_tokens < 1000:
+        score -= 10
+        suggestions.append("Subir max_output_tokens a 1200 o 1500 para evitar respuestas cortadas.")
+    elif max_tokens >= 1500:
+        suggestions.append("Mantener 1500 si priorizás calidad; bajar a 1200 si querés optimizar costo.")
+
+    if MAX_HISTORY_MESSAGES < 8:
+        score -= 8
+        suggestions.append("Subir MAX_HISTORY_MESSAGES a 8 para conversaciones más naturales.")
+
+    if MAX_MEMORY_RESULTS < 10:
+        score -= 8
+        suggestions.append("Subir MAX_MEMORY_RESULTS a 10 para recuperar mejor contexto viejo.")
+
+    if not active_tasks:
+        score -= 10
+        suggestions.append("Crear al menos una tarea automática útil, por ejemplo un reporte diario de ciberseguridad.")
+
+    if not projects:
+        suggestions.append("Crear y publicar un proyecto de prueba para validar el flujo completo de desarrollo.")
+
+    if recent_errors:
+        score -= min(20, len(recent_errors) * 5)
+        suggestions.append("Revisar /errors porque hay errores recientes registrados.")
+    else:
+        suggestions.append("Sin errores críticos recientes. Mantener healthcheck periódico.")
+
+    if config.get("auto_publish_projects") == "true":
+        score -= 6
+        suggestions.append("Mantener auto-publicar en false para evitar publicar borradores sin revisión.")
+
+    score = max(0, min(score, 100))
+
+    lines = [
+        "🧠 Diagnóstico general de Bozi-bot",
+        "",
+        f"Puntaje estimado: {score}/100",
+        "",
+        "Configuración:",
+        f"- Modo: {config.get('mode')}",
+        f"- Nivel de detalle: {config.get('detail_level')}",
+        f"- Modelo: {config.get('model')}",
+        f"- Max tokens: {config.get('max_output_tokens')}",
+        f"- Web search: {config.get('web_search')}",
+        f"- Historial reciente: {MAX_HISTORY_MESSAGES}",
+        f"- Memorias semánticas: {MAX_MEMORY_RESULTS}",
+        "",
+        "Tareas:",
+        f"- {len(tasks)} totales / {len(active_tasks)} activas",
+        "",
+        "Proyectos:",
+        f"- {len(projects)} publicados",
+        "",
+        "Errores:",
+        f"- {len(recent_errors)} errores recientes",
+        "",
+        "Sugerencias accionables:",
+    ]
+
+    for i, suggestion in enumerate(suggestions[:6], start=1):
+        lines.append(f"{i}. {suggestion}")
+
+    lines.append("")
+    lines.append("Para aplicar cambios, escribime una orden natural. Ejemplos:")
+    lines.append("- cambiá max_output_tokens a 1200")
+    lines.append("- activá modo gerente")
+    lines.append("- creá una tarea diaria de reporte de ciberseguridad")
+
+    return "\\n".join(lines)
+
+
 def panel_errors_text(chat_id):
     events = get_recent_events(chat_id, limit=10)
 
@@ -2055,6 +2152,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await edit_panel(query, describe_mode())
     elif data == "panel_errors":
         await edit_panel(query, panel_errors_text(chat_id))
+    elif data == "panel_diagnostico":
+        await edit_panel(query, build_diagnostic_text(chat_id))
     else:
         await edit_panel(query, "No reconozco esa opción.", main_menu_keyboard())
 
@@ -2115,6 +2214,11 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(describe_mode())
 
 
+async def cmd_diagnostico(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(build_diagnostic_text(chat_id))
+
+
 async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Reiniciando servicio en Render...")
     os._exit(0)
@@ -2150,6 +2254,7 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("agents", cmd_agents))
     application.add_handler(CommandHandler("cost", cmd_cost))
     application.add_handler(CommandHandler("mode", cmd_mode))
+    application.add_handler(CommandHandler("diagnostico", cmd_diagnostico))
     application.add_handler(CommandHandler("restart", cmd_restart))
 
     application.add_handler(
