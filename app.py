@@ -44,6 +44,9 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
 AUTO_SUGGESTIONS_ENABLED = os.getenv("AUTO_SUGGESTIONS_ENABLED", "true").lower() == "true"
 AUTO_HEALTH_ALERTS_ENABLED = os.getenv("AUTO_HEALTH_ALERTS_ENABLED", "true").lower() == "true"
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
+AUTO_SUGGESTIONS_ENABLED = os.getenv("AUTO_SUGGESTIONS_ENABLED", "true").lower() == "true"
+AUTO_HEALTH_ALERTS_ENABLED = os.getenv("AUTO_HEALTH_ALERTS_ENABLED", "true").lower() == "true"
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -77,6 +80,7 @@ DEFAULT_BOT_CONFIG = {
     "model": OPENAI_MODEL,
     "max_output_tokens": str(MAX_OUTPUT_TOKENS),
     "test_config": "off",
+    "active_project_id": "",
 }
 
 if not TELEGRAM_TOKEN:
@@ -129,6 +133,28 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(html.encode("utf-8"))
+            return
+
+        file_match = re.match(r"^/projects/(\d+)/files/([^/]+)$", path)
+        if file_match:
+            project_id = int(file_match.group(1))
+            filename = file_match.group(2)
+            file_row = get_project_file(project_id, filename)
+
+            if not file_row:
+                self.send_response(404)
+                self.send_header("Content-type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Archivo no encontrado.")
+                return
+
+            content_type = file_row.get("content_type") or "text/plain; charset=utf-8"
+            content = file_row.get("content") or ""
+
+            self.send_response(200)
+            self.send_header("Content-type", content_type)
+            self.end_headers()
+            self.wfile.write(content.encode("utf-8"))
             return
 
         file_match = re.match(r"^/projects/(\d+)/files/([^/]+)$", path)
@@ -226,6 +252,13 @@ CAPACIDADES REALES DEL SISTEMA:
 - Podés ayudar con temas generales, pero tu especialidad fuerte es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización.
 
 REGLAS CRÍTICAS:
+- Conversá con Iván como un humano profesional: natural, claro, concreto, preciso y resolutivo.
+- Mantené el hilo de conversación: si venimos trabajando en un proyecto, una tarea o una configuración, asumí continuidad salvo que Iván cambie explícitamente de tema.
+- Si Iván da órdenes cortas o sueltas como "mejoralo", "cambialo", "hacelo más moderno", "publicalo", "seguí", "dale", interpretalas según el contexto activo.
+- Si existe un proyecto activo, cualquier pedido de diseño, colores, logo, secciones, mejoras visuales, textos, estructura o publicación debe aplicarse a ese proyecto.
+- No contestes como si cada mensaje fuera una conversación nueva.
+- No pidas confirmaciones innecesarias cuando la intención sea razonable y segura.
+- Proponé mejoras útiles cuando detectes una oportunidad, pero sin llenar la respuesta de texto innecesario.
 - Cuando Iván mencione agentes, equipo, contratar agentes o gerente general, interpretalo como roles ficticios internos del bot.
 - No sugieras LinkedIn, reclutamiento ni contratación real salvo que Iván lo pida explícitamente.
 - Nunca digas que no podés programar tareas si el usuario pide una tarea compatible.
@@ -701,6 +734,9 @@ def normalize_config_value(key, value):
 
     value = str(value).strip()
 
+    if key == "active_project_id":
+        return value if value.isdigit() else ""
+
     allowed_values = {
         "mode": {"asistente_general_tecnico", "gerente_general", "cto", "devops", "cybersec", "sysadmin", "diseñador_ux", "minimalista"},
         "response_style": {"natural_profesional", "ejecutivo", "tecnico", "cercano", "directo", "didactico"},
@@ -841,6 +877,162 @@ APLICACIÓN DE CONFIGURACIÓN:
     return f"{BASE_SYSTEM_PROMPT}\n\n{runtime_rules}".strip()
 
 
+
+def get_active_project_id(chat_id):
+    config = get_bot_config(chat_id)
+    raw_id = config.get("active_project_id", "")
+    try:
+        return int(raw_id) if str(raw_id).isdigit() else None
+    except Exception:
+        return None
+
+
+def set_active_project_id(chat_id, project_id):
+    try:
+        save_bot_config(chat_id, {"active_project_id": str(project_id)})
+    except Exception as e:
+        logging.warning(f"No pude guardar active_project_id: {e}")
+
+
+def get_active_project(chat_id):
+    project_id = get_active_project_id(chat_id)
+
+    if project_id:
+        project = get_project(chat_id, project_id)
+        if project:
+            return project
+
+    try:
+        res = (
+            supabase
+            .table("projects")
+            .select("id, title, content, html_content, project_type")
+            .eq("chat_id", chat_id)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        project = res.data[0] if res.data else None
+
+        if project:
+            set_active_project_id(chat_id, project["id"])
+
+        return project
+    except Exception as e:
+        logging.error(f"Error obteniendo proyecto activo: {e}")
+        return None
+
+
+def build_active_context(chat_id):
+    context_lines = []
+
+    try:
+        config = get_bot_config(chat_id)
+        if config:
+            context_lines.append(
+                "Configuración activa: "
+                f"modo={config.get('mode')}, "
+                f"detalle={config.get('detail_level')}, "
+                f"modelo={config.get('model')}, "
+                f"tokens={config.get('max_output_tokens')}"
+            )
+    except Exception:
+        pass
+
+    try:
+        active_project = get_active_project(chat_id)
+        if active_project:
+            context_lines.append(
+                "Proyecto activo: "
+                f"#{active_project.get('id')} - {active_project.get('title')}. "
+                "Si Iván pide cambios visuales, textos, secciones, logo, colores, mejoras o publicación, aplicarlos a este proyecto."
+            )
+    except Exception:
+        pass
+
+    try:
+        active_tasks = [t for t in list_tasks(chat_id) if t.get("is_active")]
+        if active_tasks:
+            context_lines.append(f"Tareas activas: {len(active_tasks)}.")
+    except Exception:
+        pass
+
+    if not context_lines:
+        return ""
+
+    return "\n".join(context_lines)
+
+
+def is_short_contextual_reply(text):
+    t = text.lower().strip()
+    return t in {
+        "si", "sí", "dale", "ok", "perfecto", "hacelo", "hace eso",
+        "aplicalo", "aplica eso", "seguí", "segui", "continuá", "continua",
+        "mejoralo", "mejorala", "publicalo", "publicala"
+    }
+
+
+
+def is_project_followup_edit(text):
+    t = text.lower().strip()
+
+    if is_config_update_question(text):
+        return False
+
+    triggers = [
+        "cambia", "cambiá", "modifica", "modificá", "mejora", "mejorá",
+        "agrega", "agregá", "añade", "añadí", "quita", "quitá",
+        "saca", "sacá", "ajusta", "ajustá", "diseña", "diseñá",
+        "poné", "pone", "hacelo", "hacela", "que quede",
+        "quiero que quede", "más moderno", "mas moderno",
+        "más elegante", "mas elegante", "colores", "logo",
+        "sección", "seccion", "botón", "boton", "animación", "animacion",
+        "seguí", "segui", "dale", "aplicalo", "aplica eso", "sumalo",
+        "hacé eso", "hace eso", "quiero eso", "probá", "proba",
+        "mostrame", "mostrar", "cómo va", "como va", "continuá", "continua",
+    ]
+
+    return any(trigger in t for trigger in triggers)
+
+
+def update_published_project(chat_id, project, change_request, config=None):
+    old_html = project.get("html_content") or project.get("content") or ""
+
+    if not old_html:
+        return None
+
+    new_html = edit_html(old_html, change_request, config)
+
+    try:
+        res = (
+            supabase
+            .table("projects")
+            .update({
+                "content": new_html,
+                "html_content": new_html,
+                "updated_at": utc_iso(),
+            })
+            .eq("chat_id", chat_id)
+            .eq("id", project["id"])
+            .execute()
+        )
+        updated = res.data[0] if res.data else None
+        save_project_files(project["id"], new_html)
+        set_active_project_id(chat_id, project["id"])
+
+        return updated or {
+            "id": project["id"],
+            "title": project.get("title", "Proyecto"),
+            "html_content": new_html,
+            "content": new_html,
+            "project_type": "html",
+        }
+
+    except Exception as e:
+        logging.error(f"Error actualizando proyecto publicado #{project.get('id')}: {e}")
+        return None
+
+
 def get_model_from_config(config):
     model = config.get("model", OPENAI_MODEL)
 
@@ -871,7 +1063,8 @@ def format_config(config):
         f"- Web search: {config.get('web_search')}\n"
         f"- Modelo: {config.get('model')}\n"
         f"- Máximo tokens salida: {config.get('max_output_tokens')}\n"
-        f"- Test config: {config.get('test_config')}"
+        f"- Test config: {config.get('test_config')}\n"
+        f"- Proyecto activo: {config.get('active_project_id') or 'ninguno'}"
     )
 
 
@@ -1545,8 +1738,14 @@ def run_due_tasks():
 # ---------------------------------------------------
 # OPENAI CHAT / BUILDER
 # ---------------------------------------------------
-def build_chat_input(user_text, history, semantic_memories, web_context):
+def build_chat_input(user_text, history, semantic_memories, web_context, active_context=""):
     messages = []
+
+    if active_context:
+        messages.append({
+            "role": "user",
+            "content": "Contexto activo de trabajo:\n" + active_context,
+        })
 
     if semantic_memories:
         memory_lines = [
@@ -1556,7 +1755,7 @@ def build_chat_input(user_text, history, semantic_memories, web_context):
 
         messages.append({
             "role": "user",
-            "content": "Recuerdos relevantes:\n" + "\n".join(memory_lines),
+            "content": "Recuerdos relevantes de conversaciones anteriores:\n" + "\n".join(memory_lines),
         })
 
     for m in history:
@@ -1677,6 +1876,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     semantic_memories = get_semantic_memories(chat_id, user_embedding)
     history = get_recent_history(chat_id)
     web_context = get_web_context(user_text, config)
+    active_context = build_active_context(chat_id)
 
     project_saved = None
     draft_saved = None
@@ -1821,6 +2021,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"Listo Iván. Te armé y publiqué el proyecto como #{project_saved['id']}.\n\n"
                             f"Ver online:\n{get_project_url(project_saved['id'])}"
                             f"{format_project_files_urls(project_saved['id'])}"
+                            f"{format_project_files_urls(project_saved['id'])}"
                         )
                     else:
                         answer = "Generé el borrador, pero no pude publicarlo."
@@ -1840,9 +2041,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif intent == "PROJECT_DRAFT_EDIT":
             draft = get_latest_draft(chat_id)
 
-            if not draft:
-                answer = "No tengo un borrador activo para editar. Primero pedime que cree una página o proyecto."
-            else:
+            if draft:
                 new_html = edit_html(draft["html_content"], user_text, config)
 
                 draft_saved = update_draft(
@@ -1856,6 +2055,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Listo Iván. Apliqué los cambios al borrador. "
                     "Cuando quieras verlo online, decime: publicalo."
                 )
+            else:
+                active_project = get_active_project(chat_id)
+
+                if active_project:
+                    updated_project = update_published_project(chat_id, active_project, user_text, config)
+
+                    if updated_project:
+                        project_id = updated_project["id"]
+                        answer = (
+                            f"Listo Iván. Actualicé el proyecto activo #{project_id}.\n\n"
+                            f"Ver online:\n{get_project_url(project_id)}"
+                            f"{format_project_files_urls(project_id)}"
+                        )
+                    else:
+                        answer = "Encontré el proyecto activo, pero no pude actualizarlo. Revisá /errors o logs."
+                else:
+                    answer = "No tengo un borrador ni proyecto activo para editar. Primero pedime que cree una página o proyecto."
 
         elif intent == "PROJECT_PUBLISH":
             draft = get_latest_draft(chat_id)
@@ -1871,6 +2087,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     answer = (
                         f"Listo Iván. Proyecto publicado como #{project_saved['id']}.\n\n"
                         f"Ver online:\n{url}"
+                        f"{format_project_files_urls(project_saved['id'])}"
                         f"{format_project_files_urls(project_saved['id'])}"
                     )
                 else:
@@ -1917,12 +2134,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     answer = "No encontré ese proyecto."
 
+        elif is_project_followup_edit(user_text) and get_active_project(chat_id):
+            active_project = get_active_project(chat_id)
+            lower_text = user_text.lower().strip()
+
+            if any(x in lower_text for x in ["mostrame", "mostrar", "cómo va", "como va", "ver", "pasame la url"]):
+                project_id = active_project["id"]
+                answer = (
+                    f"Estamos trabajando sobre el proyecto activo #{project_id}.\n\n"
+                    f"Ver online:\n{get_project_url(project_id)}"
+                    f"{format_project_files_urls(project_id)}"
+                )
+            else:
+                updated_project = update_published_project(chat_id, active_project, user_text, config)
+
+                if updated_project:
+                    project_id = updated_project["id"]
+                    answer = (
+                        f"Listo Iván. Entendí que querías seguir trabajando sobre el proyecto activo #{project_id}.\n\n"
+                        f"Apliqué los cambios solicitados.\n\n"
+                        f"Ver online:\n{get_project_url(project_id)}"
+                        f"{format_project_files_urls(project_id)}"
+                    )
+                else:
+                    answer = "Encontré el proyecto activo, pero no pude actualizarlo. Revisá /errors o logs."
+
+        elif is_short_contextual_reply(user_text) and get_active_project(chat_id):
+            active_project = get_active_project(chat_id)
+            project_id = active_project["id"]
+            answer = (
+                f"Sigo con el proyecto activo #{project_id}.\n\n"
+                f"Ver online:\n{get_project_url(project_id)}"
+                f"{format_project_files_urls(project_id)}\n\n"
+                "Decime el cambio puntual y lo aplico sobre este proyecto."
+            )
+
         else:
             input_messages = build_chat_input(
                 user_text,
                 history,
                 semantic_memories,
                 web_context,
+                active_context,
             )
 
             answer = ask_openai_chat(input_messages, config)
