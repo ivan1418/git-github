@@ -342,7 +342,10 @@ Reglas anti-anclaje:
 
 Confirmación:
 - needs_confirmation=false si la intención y objetivo están claros.
-- needs_confirmation=true si puede crear, borrar, editar o cambiar algo equivocado.
+- No pidas confirmación para crear un borrador/proyecto nuevo cuando Iván lo pide claramente.
+- No pidas confirmación para editar un borrador/proyecto activo cuando el cambio es claro y no destructivo.
+- No pidas confirmación para crear o editar una tarea cuando el pedido es claro.
+- needs_confirmation=true solo si hay ambigüedad real, riesgo de borrar/desactivar algo, cambiar configuración sensible o tocar el objeto equivocado.
 - Si Iván dice "editá la tarea", "modificá el reporte", "cambiá la tarea", es TASK_EDIT_ACTIVE, no TASK_CREATE.
 - Si habla de una tarea/reporte, NO edites proyecto aunque haya proyecto activo.
 - Si habla de colores/logo/diseño/landing y hay proyecto activo, es PROJECT_EDIT_ACTIVE.
@@ -758,6 +761,10 @@ def explicitly_asks_for_suggestions(text):
 
 def should_suppress_proactivity(user_text, answer=""):
     t = (user_text or "").lower().strip()
+    a = (answer or "").lower().strip()
+
+    if "respondeme con" in a or "¿confirmo?" in a or "¿voy por ahí?" in a:
+        return True
 
     if is_conversation_closing(t) or is_smalltalk_only(t) or is_simple_greeting(t) or is_short_casual_message(t):
         return True
@@ -912,12 +919,15 @@ def generate_proactive_suggestions(chat_id, user_text, answer, config):
     return unique[:3]
 
 def enhance_with_proactivity(chat_id, answer, user_text, config):
-    # No meter sugerencias en saludos, cierres, agradecimientos, respuestas cortas o charla casual.
-    # Esto evita que el bot quede atado a tareas/proyectos cuando Iván consulta otra cosa.
+    # La proactividad automática repetitiva rompe la sensación humana.
+    # A partir de ahora solo se agregan sugerencias si Iván las pide explícitamente.
     if should_suppress_proactivity(user_text, answer):
         return answer
 
     if not is_proactive_enabled(config):
+        return answer
+
+    if not explicitly_asks_for_suggestions(user_text):
         return answer
 
     suggestions = generate_proactive_suggestions(chat_id, user_text, answer, config)
@@ -925,7 +935,7 @@ def enhance_with_proactivity(chat_id, answer, user_text, config):
     if not suggestions:
         return answer
 
-    extra = ["", "💡 Sugerencias proactivas:"]
+    extra = ["", "💡 Ideas que te propongo:"]
     for i, suggestion in enumerate(suggestions, start=1):
         extra.append(f"{i}. {suggestion}")
 
@@ -1519,22 +1529,34 @@ Contexto activo:
         needs_confirmation = bool(data.get("needs_confirmation", False))
 
         # Reglas de seguridad adicionales:
-        # Si hay baja confianza en acciones que modifican datos, confirmar.
-        risky = {
-            "PROJECT_EDIT_ACTIVE",
-            "PROJECT_CREATE_NEW",
-            "PROJECT_PUBLISH_ACTIVE",
-            "TASK_CREATE",
-            "TASK_EDIT_ACTIVE",
+        # Confirmar solo cuando hay riesgo real o baja confianza.
+        destructive_or_sensitive = {
             "TASK_DELETE",
             "CONFIG_UPDATE",
+            "PROJECT_PUBLISH_ACTIVE",
         }
 
-        if intent in risky and confidence < 0.78:
+        editable_but_safe = {
+            "PROJECT_EDIT_ACTIVE",
+            "PROJECT_CREATE_NEW",
+            "TASK_CREATE",
+            "TASK_EDIT_ACTIVE",
+        }
+
+        if intent in destructive_or_sensitive and confidence < 0.88:
+            needs_confirmation = True
+
+        if intent in editable_but_safe and confidence < 0.70:
             needs_confirmation = True
 
         if intent == "AMBIGUOUS":
             needs_confirmation = True
+
+        if intent == "PROJECT_CREATE_NEW" and confidence >= 0.70:
+            needs_confirmation = False
+
+        if intent in {"TASK_EDIT_ACTIVE", "PROJECT_EDIT_ACTIVE", "TASK_CREATE"} and confidence >= 0.78:
+            needs_confirmation = False
 
         return {
             "intent": intent,
@@ -2489,7 +2511,7 @@ def natural_confirmation_question(route, user_text):
     elif intent == "PROJECT_EDIT_ACTIVE":
         base = "Entiendo que querés seguir trabajando sobre el proyecto activo y aplicarle ese cambio. ¿Voy por ahí?"
     elif intent == "PROJECT_CREATE_NEW":
-        base = "Entiendo que querés crear un proyecto nuevo desde cero. ¿Confirmo?"
+        base = "Creo que querés arrancar un proyecto nuevo desde cero. ¿Voy por ahí?"
     elif intent == "PROJECT_PUBLISH_ACTIVE":
         base = "Entiendo que querés publicar el borrador/proyecto activo. ¿Lo publico?"
     elif intent == "CONFIG_UPDATE":
@@ -2527,20 +2549,29 @@ def should_execute_action(route):
     intent = route.get("intent", "NORMAL_CHAT")
     confidence = float(route.get("confidence", 0) or 0)
 
-    risky = {
-        "PROJECT_EDIT_ACTIVE",
-        "PROJECT_CREATE_NEW",
-        "PROJECT_PUBLISH_ACTIVE",
-        "TASK_CREATE",
-        "TASK_EDIT_ACTIVE",
-        "TASK_DELETE",
-        "CONFIG_UPDATE",
-    }
+    if intent == "AMBIGUOUS":
+        return False
 
     if route.get("needs_confirmation"):
         return False
 
-    if intent in risky and confidence < 0.78:
+    destructive_or_sensitive = {
+        "TASK_DELETE",
+        "CONFIG_UPDATE",
+        "PROJECT_PUBLISH_ACTIVE",
+    }
+
+    editable_but_safe = {
+        "PROJECT_EDIT_ACTIVE",
+        "PROJECT_CREATE_NEW",
+        "TASK_CREATE",
+        "TASK_EDIT_ACTIVE",
+    }
+
+    if intent in destructive_or_sensitive and confidence < 0.88:
+        return False
+
+    if intent in editable_but_safe and confidence < 0.70:
         return False
 
     return True
@@ -2796,13 +2827,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if draft_saved:
                 answer = (
-                    "Listo Iván. Te armé un primer borrador del proyecto.\n\n"
-                    "Todavía no lo publiqué como URL final.\n\n"
-                    "Podés decirme:\n"
-                    "- publicalo\n"
-                    "- cambiar colores\n"
-                    "- agregar sección de contacto\n"
-                    "- ver borrador"
+                    "Dale, te armé un primer borrador del proyecto.\n\n"
+                    "Lo dejé como borrador para que lo podamos ajustar antes de publicarlo. "
+                    "Cuando quieras verlo online, decime: publicalo."
                 )
             else:
                 answer = "Generé el borrador, pero no pude guardarlo."
