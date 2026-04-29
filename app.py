@@ -1,5 +1,5 @@
 import os
-import asyncio
+import base64
 import re
 import json
 import logging
@@ -12,7 +12,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -47,6 +46,7 @@ AUTO_SUGGESTIONS_ENABLED = os.getenv("AUTO_SUGGESTIONS_ENABLED", "true").lower()
 AUTO_HEALTH_ALERTS_ENABLED = os.getenv("AUTO_HEALTH_ALERTS_ENABLED", "true").lower() == "true"
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "8"))
@@ -229,7 +229,10 @@ CAPACIDADES REALES DEL SISTEMA:
 - Podés ayudar con temas generales, pero tu especialidad fuerte es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización.
 
 REGLAS CRÍTICAS:
-- Conversá con Iván como un humano profesional: natural, claro, concreto, preciso, resolutivo y cuando se pueda se divertido.
+- Conversá con Iván como un humano real, profesional y cercano. Natural, claro, concreto, resolutivo y con humor liviano cuando encaje.
+- No seas un bot rígido ni dependas de palabras sueltas: interpretá contexto, intención, referencias como "eso", "lo anterior", "la tarea", "el proyecto" y el hilo de la charla.
+- Tu especialidad fuerte es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización, pero podés ayudar con temas generales: análisis, escritura, negocios, organización, aprendizaje, investigación y resolución de problemas.
+- Si Iván manda una imagen/captura, analizala como evidencia visual: detectá errores, pantallas, mensajes, logs, configuraciones y explicá problema + solución.
 - Mantené el hilo de conversación como un humano: distinguí charla normal, despedidas, agradecimientos, dudas, planificación y trabajo real.
 - No asumas que todo mensaje corto es una orden. Frases como "ok gracias", "mañana seguimos", "me voy a dormir", "después vemos", "lo vemos mañana" son cierre de conversación, no edición de proyecto.
 - Si venimos trabajando en un proyecto, seguí el contexto SOLO cuando Iván pida una acción concreta sobre el proyecto: mejorar, cambiar, agregar, quitar, publicar, mostrar, diseñar, ajustar, modificar o revisar.
@@ -268,88 +271,82 @@ REGLAS:
 """
 
 
-INTENT_PROMPT = """
-Clasificá la intención del usuario.
+VISION_ANALYSIS_PROMPT = f"""
+Sos Bozi-bot con visión. Analizás imágenes/capturas como un asistente técnico experto y humano.
 
-Respondé SOLO una etiqueta:
+Tu tarea:
+- Mirar la imagen con atención.
+- Detectar si hay error, log, configuración, pantalla, código, panel, web o conversación.
+- Explicar qué se ve.
+- Identificar el problema probable.
+- Dar una solución concreta paso a paso.
+- Si no se ve claro, pedí una captura más amplia o el texto del error.
 
-CHAT_SIMPLE
-CONFIG_UPDATE
-CONFIG_VIEW
-PROJECT_DRAFT_CREATE
-PROJECT_DRAFT_EDIT
-PROJECT_PUBLISH
-PROJECT_VIEW_DRAFT
-PROJECT_LIST
-PROJECT_VIEW_PUBLISHED
-TASK_CREATE
-TASK_LIST
-TASK_DELETE
-TIME_REMAINING
+Estilo:
+- Natural, directo y confiable.
+- No inventes datos que no se ven.
+- Si es una captura técnica, priorizá diagnóstico y solución.
+- Si hay varias posibilidades, ordenalas por probabilidad.
+- Si el problema puede afectar deploy, base de datos, Telegram, OpenAI, Render o Supabase, mencioná qué revisar.
 
-Criterios:
-CHAT_SIMPLE = charla, duda, debate, consulta, pensar juntos, preguntar si algo se puede.
-CONFIG_UPDATE = pide cambiar el modo, personalidad, tono, modelo, nivel de detalle, comportamiento, activar modo gerente o modificar configuración del bot.
-CONFIG_VIEW = pide ver configuración actual del bot.
-PROJECT_DRAFT_CREATE = pide crear/diseñar/desarrollar una web, página, landing, dashboard, interfaz, app visual o proyecto entregable.
-PROJECT_DRAFT_EDIT = pide cambiar/modificar/mejorar/agregar algo al borrador actual.
-PROJECT_PUBLISH = pide publicar, crear URL, pasar URL, deployar o guardar como proyecto final.
-PROJECT_VIEW_DRAFT = pide ver el borrador actual.
-PROJECT_LIST = pide listar proyectos.
-PROJECT_VIEW_PUBLISHED = pide ver proyecto publicado por ID.
-TASK_CREATE = pide guardar/agendar/programar/enviar un reporte o recordatorio en el futuro o de forma recurrente.
-TASK_LIST = pide ver/listar tareas.
-TASK_DELETE = pide borrar/cancelar/desactivar tarea.
-TIME_REMAINING = pregunta cuánto falta, cuándo es, a qué hora, o cuánto tiempo queda para una tarea/horario.
+Respondé en español para Iván.
 """
 
 
 CONTEXT_ROUTER_PROMPT = """
-Sos el router inteligente de intención conversacional de Bozi-bot.
+Sos el router inteligente de Bozi-bot. Interpretás a Iván como un asistente humano muy inteligente, no como un clasificador rígido.
 
-Tenés que interpretar a Iván como si fueras un asistente humano muy inteligente:
-- Usá el mensaje actual.
-- Usá el historial reciente.
-- Usá el contexto activo.
-- Diferenciá charla normal, proyecto, tarea y configuración.
-- Si hay duda real antes de modificar/crear algo, pedí confirmación.
-- Nunca crees una tarea nueva si el usuario está pidiendo editar una tarea existente.
-- Nunca edites un proyecto si el usuario está hablando de una tarea.
-- Nunca ejecutes cambios por agradecimientos, despedidas o frases ambiguas.
+Objetivo:
+- Entender qué quiso hacer Iván usando mensaje actual + historial + contexto activo.
+- Diferenciar charla normal, proyecto, tarea, configuración e imagen.
+- No depender de palabras sueltas.
+- Si hay riesgo de tocar algo equivocado, pedir confirmación.
+- Si está claro y es seguro, ejecutar sin molestar.
 
-Respondé SOLO JSON válido con esta estructura:
+Respondé SOLO JSON válido:
 
 {
-  "intent": "NORMAL_CHAT | CLOSING_CHAT | PROJECT_EDIT_ACTIVE | PROJECT_SHOW_ACTIVE | PROJECT_PUBLISH_ACTIVE | PROJECT_CREATE_NEW | CONFIG_UPDATE | CONFIG_VIEW | TASK_CREATE | TASK_EDIT_ACTIVE | TASK_LIST | TASK_DELETE | TIME_REMAINING | AMBIGUOUS",
+  "intent": "NORMAL_CHAT | CLOSING_CHAT | PROJECT_EDIT_ACTIVE | PROJECT_SHOW_ACTIVE | PROJECT_PUBLISH_ACTIVE | PROJECT_CREATE_NEW | CONFIG_UPDATE | CONFIG_VIEW | TASK_CREATE | TASK_EDIT_ACTIVE | TASK_LIST | TASK_DELETE | TIME_REMAINING | IMAGE_ANALYSIS | AMBIGUOUS",
   "confidence": 0.0,
   "needs_confirmation": true,
-  "target": "none | active_project | active_task | new_project | new_task | config",
-  "reason": "explicación breve"
+  "target": "none | active_project | active_task | new_project | new_task | config | image",
+  "reason": "breve explicación natural"
 }
 
-Reglas de decisión:
-- NORMAL_CHAT: charla, duda, comentario, análisis, agradecimiento parcial, planificación o conversación que no debe tocar nada.
-- CLOSING_CHAT: despedida o pausa: "mañana seguimos", "gracias", "me voy a dormir", "después vemos".
-- PROJECT_CREATE_NEW: pide crear desde cero una landing, web, página, app, dashboard o proyecto.
-- PROJECT_EDIT_ACTIVE: pide modificar un proyecto existente: colores, logo, textos, diseño, secciones, hacerlo moderno/elegante, mejorar landing, etc.
-- PROJECT_SHOW_ACTIVE: pide ver URL, mostrar borrador, ver cómo quedó, mostrar proyecto.
-- PROJECT_PUBLISH_ACTIVE: pide publicar el borrador/proyecto.
-- TASK_CREATE: pide crear/agendar/programar una tarea o reporte nuevo.
-- TASK_EDIT_ACTIVE: pide editar/modificar/cambiar una tarea o reporte ya programado.
-- TASK_LIST: pide ver/listar tareas.
-- TASK_DELETE: pide borrar/cancelar/desactivar una tarea.
-- CONFIG_UPDATE: pide cambiar comportamiento, modo, modelo, tokens, proactividad o configuración.
-- CONFIG_VIEW: pide ver configuración/modelos.
-- TIME_REMAINING: pregunta cuánto falta, cuándo es o tiempo restante.
-- AMBIGUOUS: no estás seguro si debe editar tarea, proyecto o crear algo nuevo.
+Reglas:
+- NORMAL_CHAT: charla, duda, comentario, análisis, consulta o conversación sin cambios.
+- CLOSING_CHAT: "gracias", "mañana seguimos", "me voy a dormir", "después vemos", pausa o cierre.
+- PROJECT_CREATE_NEW: crear desde cero una landing, web, página, dashboard, app, interfaz o proyecto visual.
+- PROJECT_EDIT_ACTIVE: modificar proyecto existente: colores, logo, textos, secciones, diseño, responsive, hacerlo moderno/elegante.
+- PROJECT_SHOW_ACTIVE: ver URL, mostrar borrador/proyecto o revisar cómo quedó.
+- PROJECT_PUBLISH_ACTIVE: publicar o crear URL del borrador/proyecto.
+- TASK_CREATE: crear/agendar/programar un reporte o recordatorio nuevo.
+- TASK_EDIT_ACTIVE: editar/modificar/cambiar una tarea/reporte ya programado.
+- TASK_LIST: listar/ver tareas.
+- TASK_DELETE: borrar/cancelar/desactivar tarea.
+- CONFIG_UPDATE: cambiar modo, modelo, tokens, tono, proactividad o configuración.
+- CONFIG_VIEW: ver configuración/modelos.
+- TIME_REMAINING: cuánto falta, cuándo es, tiempo restante.
+- IMAGE_ANALYSIS: analizar captura, error, pantalla, imagen, evidencia visual.
+- AMBIGUOUS: no estás seguro si debe crear/editar/tocar algo.
 
-Criterios de confirmación:
-- needs_confirmation=false si la intención y el objetivo están claros.
-- needs_confirmation=true si hay riesgo de crear/editar algo incorrecto.
-- Si el mensaje contiene "editá la tarea", "modificá el reporte", "cambiá la tarea", debe ser TASK_EDIT_ACTIVE, no TASK_CREATE.
-- Si dice "cambia los colores", "agregá un logo", "mejorá el diseño" y hay proyecto activo, debe ser PROJECT_EDIT_ACTIVE.
-- Si dice "ok", "gracias", "mañana seguimos", debe ser CLOSING_CHAT o NORMAL_CHAT, nunca PROJECT_EDIT_ACTIVE.
+Confirmación:
+- needs_confirmation=false si la intención y objetivo están claros.
+- needs_confirmation=true si puede crear, borrar, editar o cambiar algo equivocado.
+- Si Iván dice "editá la tarea", "modificá el reporte", "cambiá la tarea", es TASK_EDIT_ACTIVE, no TASK_CREATE.
+- Si habla de una tarea/reporte, NO edites proyecto aunque haya proyecto activo.
+- Si habla de colores/logo/diseño/landing y hay proyecto activo, es PROJECT_EDIT_ACTIVE.
+- Si dice "ok", "gracias", "mañana seguimos", nunca ejecutes acciones.
+- Si dice "sí", "dale", "hacelo" y hay confirmación pendiente, es confirmación.
+
+Ejemplos:
+"editá la tarea para que el reporte sea de los últimos 7 días" -> TASK_EDIT_ACTIVE, target active_task.
+"mandame todos los días un reporte" -> TASK_CREATE, target new_task.
+"cambiá los colores y agregá un logo" -> PROJECT_EDIT_ACTIVE si hay proyecto activo.
+"mirá esta captura, qué error hay?" -> IMAGE_ANALYSIS, target image.
+"qué opinás?" -> NORMAL_CHAT.
 """
+
 
 
 
@@ -946,8 +943,8 @@ def describe_agent_team():
 def describe_cost_mode():
     return (
         "Modo costo actual:\n\n"
-        f"- Modelo principal: {OPENAI_MODEL}\n"
-        f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
+        f"- Modelo principal: {OPENAI_MODEL}\n" f"- Modelo visión: {OPENAI_VISION_MODEL}\n"
+        f"- Modelo visión: {OPENAI_VISION_MODEL}\n" f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
         f"- Máximo tokens salida: {MAX_OUTPUT_TOKENS}\n"
         f"- Web search: {USE_WEB_SEARCH}\n\n"
         "Recomendación:\n"
@@ -1111,6 +1108,7 @@ CONFIGURACIÓN DINÁMICA ACTUAL:
 - Modelo preferido: {config.get("model")}
 - Test configuración: {config.get("test_config")}
 - Modo proactivo: {config.get("proactive_mode")}
+- Modelo visión: {OPENAI_VISION_MODEL}
 
 APLICACIÓN DE CONFIGURACIÓN:
 - Si mode = gerente_general, actuá como gerente general ficticio operativo de Iván.
@@ -1123,6 +1121,15 @@ APLICACIÓN DE CONFIGURACIÓN:
 - Si response_style = ejecutivo, respondé con foco en decisiones, impacto y próximos pasos.
 - Si agent_team = enabled, podés simular internamente especialistas ficticios, pero entregá una respuesta final unificada.
 - Si proactive_mode = on, agregá sugerencias útiles, concretas y accionables cuando corresponda, sin hacer respuestas largas de más.
+
+ESTILO HUMANO:
+- Respondé como si estuvieras hablando con Iván en una conversación real.
+- No repitas siempre "Listo Iván" si no hace falta.
+- Evitá sonar como sistema o manual técnico.
+- Si ejecutaste algo, confirmalo simple y claro.
+- Si no estás seguro, preguntá natural y breve.
+- Si es charla, no la conviertas en tarea/proyecto.
+- No enumeres todo salvo que la respuesta lo necesite.
 """
     return f"{BASE_SYSTEM_PROMPT}\n\n{runtime_rules}".strip()
 
@@ -1463,64 +1470,6 @@ Contexto activo:
     except Exception as e:
         logging.error(f"Error router contextual JSON: {e}")
         return fallback
-
-
-# ---------------------------------------------------
-# INTENCIÓN
-# ---------------------------------------------------
-def classify_intent(user_text):
-    lower = user_text.lower()
-
-    if is_config_view_question(user_text):
-        return "CONFIG_VIEW"
-
-    if is_config_update_question(user_text):
-        return "CONFIG_UPDATE"
-
-    if is_time_remaining_question(user_text):
-        return "TIME_REMAINING"
-
-    if any(x in lower for x in ["todos los días", "diariamente", "recordame", "agendame", "programame", "mandame un reporte", "enviame un reporte", "envíame un reporte"]):
-        return "TASK_CREATE"
-
-    if any(x in lower for x in ["listar tareas", "ver tareas", "mis tareas", "tareas programadas"]):
-        return "TASK_LIST"
-
-    if any(x in lower for x in ["borrar tarea", "cancelar tarea", "desactivar tarea"]):
-        return "TASK_DELETE"
-
-    try:
-        response = openai_client.responses.create(
-            model=OPENAI_MODEL,
-            instructions=INTENT_PROMPT,
-            input=user_text,
-            max_output_tokens=20,
-            temperature=0,
-        )
-
-        intent = response.output_text.strip().upper()
-
-        valid = {
-            "CHAT_SIMPLE",
-            "CONFIG_UPDATE",
-            "CONFIG_VIEW",
-            "PROJECT_DRAFT_CREATE",
-            "PROJECT_DRAFT_EDIT",
-            "PROJECT_PUBLISH",
-            "PROJECT_VIEW_DRAFT",
-            "PROJECT_LIST",
-            "PROJECT_VIEW_PUBLISHED",
-            "TASK_CREATE",
-            "TASK_LIST",
-            "TASK_DELETE",
-            "TIME_REMAINING",
-        }
-
-        return intent if intent in valid else "CHAT_SIMPLE"
-
-    except Exception as e:
-        logging.error(f"Error clasificando intención: {e}")
-        return "CHAT_SIMPLE"
 
 
 # ---------------------------------------------------
@@ -2091,7 +2040,7 @@ def format_task_confirmation(task):
         when = due_local.strftime("%d/%m/%Y %H:%M hs") if due_local else "sin horario"
 
     return (
-        f"Listo Iván. Actualicé la tarea #{task.get('id')}.\n\n"
+        f"Perfecto, ya actualicé la tarea #{task.get('id')}.\n\n"
         f"{task.get('title')}\n"
         f"Frecuencia: {when} ({task.get('timezone') or LOCAL_TZ_NAME}).\n\n"
         f"Nuevo objetivo:\n{trim_text(task.get('task_prompt'), 900)}"
@@ -2217,6 +2166,120 @@ def run_due_tasks():
         logging.error(f"Error scheduler: {e}")
 
 
+
+# ---------------------------------------------------
+# VISIÓN / ANÁLISIS DE IMÁGENES
+# ---------------------------------------------------
+def image_file_to_data_url(path, mime_type="image/jpeg"):
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+async def download_telegram_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return None, None
+
+    if message.photo:
+        photo = message.photo[-1]
+        file_obj = await context.bot.get_file(photo.file_id)
+        local_path = f"/tmp/{photo.file_id}.jpg"
+        await file_obj.download_to_drive(local_path)
+        return local_path, "image/jpeg"
+
+    if message.document and message.document.mime_type and message.document.mime_type.startswith("image/"):
+        doc = message.document
+        file_obj = await context.bot.get_file(doc.file_id)
+        ext = "jpg"
+        if doc.mime_type == "image/png":
+            ext = "png"
+        elif doc.mime_type == "image/webp":
+            ext = "webp"
+        local_path = f"/tmp/{doc.file_id}.{ext}"
+        await file_obj.download_to_drive(local_path)
+        return local_path, doc.mime_type
+
+    return None, None
+
+
+def analyze_image_with_openai(image_path, mime_type, user_text, chat_id, config=None):
+    config = config or get_bot_config(chat_id)
+    active_context = build_active_context(chat_id)
+    history = get_recent_history(chat_id)
+
+    caption = user_text.strip() if user_text else "Analizá esta imagen/captura y decime qué problema ves y cómo solucionarlo."
+
+    context_text = f"""
+Pedido de Iván:
+{caption}
+
+Contexto activo:
+{active_context or "Sin contexto activo."}
+
+Historial reciente:
+{summarize_history_for_router(history)}
+"""
+
+    data_url = image_file_to_data_url(image_path, mime_type)
+
+    response = openai_client.responses.create(
+        model=OPENAI_VISION_MODEL,
+        instructions=VISION_ANALYSIS_PROMPT,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": context_text},
+                    {"type": "input_image", "image_url": data_url},
+                ],
+            }
+        ],
+        max_output_tokens=get_max_tokens_from_config(config, 1300),
+        temperature=0.25,
+    )
+
+    return response.output_text.strip() or "No pude analizar la imagen con claridad."
+
+
+async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    caption = update.message.caption or ""
+    stop_typing = start_typing_loop(chat_id)
+
+    try:
+        config = get_bot_config(chat_id)
+        image_path, mime_type = await download_telegram_image(update, context)
+
+        if not image_path:
+            answer = "No pude descargar la imagen. Mandamela como foto o archivo de imagen."
+        else:
+            save_memory(chat_id, "user", f"[Imagen enviada] {caption}", None)
+            answer = analyze_image_with_openai(image_path, mime_type, caption, chat_id, config)
+            answer = make_action_response_natural(answer)
+            answer = enhance_with_proactivity(chat_id, answer, caption or "imagen", config)
+
+            save_memory(chat_id, "assistant", answer, get_openai_embedding(answer))
+
+            send_to_webhook({
+                "type": "image_analysis",
+                "chat_id": chat_id,
+                "caption": caption,
+                "bot_response": answer,
+                "model": OPENAI_VISION_MODEL,
+            })
+
+    except Exception as e:
+        logging.error(f"Error analizando imagen: {e}")
+        log_event(chat_id, "error", f"Error analizando imagen: {e}")
+        answer = "No pude analizar la imagen. Revisá logs de Render o mandame otra captura más clara."
+    finally:
+        stop_typing()
+
+    await update.message.reply_text(answer)
+
+
+
 # ---------------------------------------------------
 # OPENAI CHAT / BUILDER
 # ---------------------------------------------------
@@ -2326,6 +2389,99 @@ async def telegram_startup_cleanup(application):
     except Exception as e:
         logging.error(f"Error limpiando Telegram al iniciar: {e}")
 
+
+
+
+# ---------------------------------------------------
+# CAPA HUMANA / RESPUESTA NATURAL
+# ---------------------------------------------------
+def natural_confirmation_question(route, user_text):
+    intent = route.get("intent", "AMBIGUOUS")
+    reason = route.get("reason", "")
+
+    if intent == "TASK_EDIT_ACTIVE":
+        base = "Entiendo que querés modificar la tarea programada que ya existe, no crear una nueva. ¿Voy por ahí?"
+    elif intent == "TASK_CREATE":
+        base = "Entiendo que querés crear una tarea nueva. ¿La programo?"
+    elif intent == "TASK_DELETE":
+        base = "Entiendo que querés desactivar una tarea. ¿Confirmo?"
+    elif intent == "PROJECT_EDIT_ACTIVE":
+        base = "Entiendo que querés seguir trabajando sobre el proyecto activo y aplicarle ese cambio. ¿Voy por ahí?"
+    elif intent == "PROJECT_CREATE_NEW":
+        base = "Entiendo que querés crear un proyecto nuevo desde cero. ¿Confirmo?"
+    elif intent == "PROJECT_PUBLISH_ACTIVE":
+        base = "Entiendo que querés publicar el borrador/proyecto activo. ¿Lo publico?"
+    elif intent == "CONFIG_UPDATE":
+        base = "Entiendo que querés cambiar mi configuración. ¿Confirmo?"
+    else:
+        base = "Creo que entendí lo que querés hacer, pero prefiero confirmarlo antes de tocar algo. ¿Voy por ahí?"
+
+    if reason:
+        return f"{base}\n\nLo interpreto así: {reason}\n\nRespondeme con “sí” o “no”."
+    return f"{base}\n\nRespondeme con “sí” o “no”."
+
+
+def make_action_response_natural(answer):
+    if not answer:
+        return answer
+
+    replacements = {
+        "Listo Iván. Configuración actualizada.": "Perfecto, ya actualicé la configuración.",
+        "Listo Iván. Actualicé mi configuración.": "Perfecto, ya ajusté mi configuración.",
+        "Listo Iván. Tarea programada": "Perfecto, tarea programada",
+        "Listo Iván. Actualicé la tarea": "Perfecto, ya actualicé la tarea",
+        "Listo Iván. Proyecto publicado": "Perfecto, proyecto publicado",
+        "Listo Iván. Te armé un primer borrador": "Dale, te armé un primer borrador",
+        "Che Iván, se me tildó la IA.": "Se me trabó algo al procesarlo.",
+    }
+
+    result = answer
+    for old, new in replacements.items():
+        result = result.replace(old, new)
+
+    return result
+
+
+def should_execute_action(route):
+    intent = route.get("intent", "NORMAL_CHAT")
+    confidence = float(route.get("confidence", 0) or 0)
+
+    risky = {
+        "PROJECT_EDIT_ACTIVE",
+        "PROJECT_CREATE_NEW",
+        "PROJECT_PUBLISH_ACTIVE",
+        "TASK_CREATE",
+        "TASK_EDIT_ACTIVE",
+        "TASK_DELETE",
+        "CONFIG_UPDATE",
+    }
+
+    if route.get("needs_confirmation"):
+        return False
+
+    if intent in risky and confidence < 0.78:
+        return False
+
+    return True
+
+
+def format_human_task_created(task_saved):
+    if task_saved["schedule_type"] == "daily":
+        return (
+            f"Perfecto, tarea programada #{task_saved['id']}.\n\n"
+            f"{task_saved['title']}\n"
+            f"Te la mando todos los días a las {task_saved.get('time_of_day') or '09:00'} hs "
+            f"({LOCAL_TZ_NAME})."
+        )
+
+    due_local = parse_datetime_to_local(task_saved.get("due_at"))
+    due_txt = due_local.strftime("%d/%m/%Y %H:%M") if due_local else task_saved.get("due_at")
+
+    return (
+        f"Perfecto, tarea programada #{task_saved['id']}.\n\n"
+        f"{task_saved['title']}\n"
+        f"Fecha: {due_txt} hs ({LOCAL_TZ_NAME})."
+    )
 
 
 # ---------------------------------------------------
@@ -2438,33 +2594,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.info(f"Router prodigio: {route}")
 
         # Si el router no está seguro, pregunta antes de crear/editar/configurar.
-        if route.get("needs_confirmation"):
-            save_pending_action(chat_id, {
-                "intent": contextual_route,
-                "user_text": user_text,
-                "target": route.get("target", "none"),
-                "reason": route.get("reason", ""),
-                "created_at": utc_iso(),
-            })
-
-            if contextual_route == "TASK_EDIT_ACTIVE":
-                question = "Entendí que querés editar la tarea activa existente, no crear una nueva. ¿Confirmo?"
-            elif contextual_route == "TASK_CREATE":
-                question = "Entendí que querés crear una tarea nueva. ¿Confirmo?"
-            elif contextual_route == "PROJECT_EDIT_ACTIVE":
-                question = "Entendí que querés modificar el proyecto activo. ¿Confirmo?"
-            elif contextual_route == "PROJECT_CREATE_NEW":
-                question = "Entendí que querés crear un proyecto nuevo. ¿Confirmo?"
-            elif contextual_route == "CONFIG_UPDATE":
-                question = "Entendí que querés cambiar mi configuración. ¿Confirmo?"
+        if not should_execute_action(route):
+            if contextual_route in {
+                "PROJECT_EDIT_ACTIVE",
+                "PROJECT_CREATE_NEW",
+                "PROJECT_PUBLISH_ACTIVE",
+                "TASK_CREATE",
+                "TASK_EDIT_ACTIVE",
+                "TASK_DELETE",
+                "CONFIG_UPDATE",
+                "AMBIGUOUS",
+            }:
+                save_pending_action(chat_id, {
+                    "intent": contextual_route,
+                    "user_text": user_text,
+                    "target": route.get("target", "none"),
+                    "reason": route.get("reason", ""),
+                    "created_at": utc_iso(),
+                })
+                answer = natural_confirmation_question(route, user_text)
             else:
-                question = "Quiero confirmar antes de tocar algo: ¿querés que ejecute esta acción?"
+                input_messages = build_chat_input(
+                    user_text,
+                    history,
+                    semantic_memories,
+                    web_context,
+                    active_context,
+                )
+                answer = ask_openai_chat(input_messages, config)
 
-            answer = (
-                f"{question}\n\n"
-                f"Motivo: {route.get('reason') or 'interpretación contextual'}\n\n"
-                "Respondé: sí / no"
-            )
 
         elif contextual_route == "CLOSING_CHAT":
             answer = "Dale Iván, dejamos todo como está. Cuando quieras seguimos desde este punto."
@@ -2588,21 +2746,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             task_saved = create_scheduled_task(chat_id, task_data)
 
             if task_saved:
-                if task_saved["schedule_type"] == "daily":
-                    answer = (
-                        f"Listo Iván. Tarea programada #{task_saved['id']}.\n\n"
-                        f"{task_saved['title']}\n"
-                        f"Frecuencia: todos los días a las {task_saved.get('time_of_day') or '09:00'} hs "
-                        f"({LOCAL_TZ_NAME})."
-                    )
-                else:
-                    due_local = parse_datetime_to_local(task_saved.get("due_at"))
-                    due_txt = due_local.strftime("%d/%m/%Y %H:%M") if due_local else task_saved.get("due_at")
-                    answer = (
-                        f"Listo Iván. Tarea programada #{task_saved['id']}.\n\n"
-                        f"{task_saved['title']}\n"
-                        f"Fecha: {due_txt} hs ({LOCAL_TZ_NAME})."
-                    )
+                answer = format_human_task_created(task_saved)
             else:
                 answer = "No pude guardar la tarea. Revisá Supabase/logs."
 
@@ -2662,6 +2806,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer = "Che Iván, se me tildó la IA. Revisá logs de Render y probá de nuevo."
 
     try:
+        answer = make_action_response_natural(answer)
         answer = enhance_with_proactivity(chat_id, answer, user_text, get_bot_config(chat_id))
         assistant_embedding = get_openai_embedding(answer)
         save_memory(chat_id, "assistant", answer, assistant_embedding)
@@ -2713,7 +2858,7 @@ def diagnostic_keyboard():
 def panel_home_text():
     return (
         "Panel de control de Bozi-bot\n\n"
-        "Podés usar estos botones o hablarme normalmente.\n\n"
+        "Podés usar estos botones, hablarme normalmente o mandarme capturas para analizarlas.\n\n"
         "Comandos disponibles:\n"
         "/models /config /tasks /projects /status /health /errors /agents /cost /mode /diagnostico /restart"
     )
@@ -2795,7 +2940,7 @@ def panel_status_text(chat_id):
         "✔ Servicio: online\n"
         "✔ Telegram: polling activo\n"
         "✔ Scheduler: activo\n"
-        f"✔ Modelo: {OPENAI_MODEL}\n"
+        f"✔ Modelo texto: {OPENAI_MODEL}\n" f"✔ Modelo visión: {OPENAI_VISION_MODEL}\n"
         f"✔ Timezone: {LOCAL_TZ_NAME}\n"
         f"✔ Tareas activas: {active_tasks}\n"
         f"✔ Proyectos publicados: {project_count}\n"
@@ -2826,7 +2971,7 @@ def panel_config_text(chat_id):
     return (
         base
         + "\n\nVariables técnicas:\n"
-        f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
+        f"- Modelo visión: {OPENAI_VISION_MODEL}\n" f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
         f"- Historial reciente: {MAX_HISTORY_MESSAGES}\n"
         f"- Memorias semánticas: {MAX_MEMORY_RESULTS}\n"
         f"- Embeddings activos: {USE_EMBEDDINGS}\n"
@@ -3324,6 +3469,10 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("mode", cmd_mode))
     application.add_handler(CommandHandler("diagnostico", cmd_diagnostico))
     application.add_handler(CommandHandler("restart", cmd_restart))
+
+    application.add_handler(
+        MessageHandler((filters.PHOTO | filters.Document.IMAGE) & (~filters.COMMAND), handle_image_message)
+    )
 
     application.add_handler(
         MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
