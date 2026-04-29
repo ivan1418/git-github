@@ -73,6 +73,7 @@ DEFAULT_BOT_CONFIG = {
     "web_search": USE_WEB_SEARCH,
     "model": OPENAI_MODEL,
     "max_output_tokens": str(MAX_OUTPUT_TOKENS),
+    "test_config": "off",
 }
 
 if not TELEGRAM_TOKEN:
@@ -304,7 +305,8 @@ Campos posibles:
   "auto_publish_projects": "true | false",
   "web_search": "smart | true | false",
   "model": "gpt-4o-mini | gpt-4.1-mini | gpt-4.1 | gpt-4o",
-  "max_output_tokens": "500 | 800 | 1000 | 1500 | 2000"
+  "max_output_tokens": "500 | 800 | 1000 | 1200 | 1500 | 2000",
+  "test_config": "on | off"
 }
 
 Reglas:
@@ -471,19 +473,40 @@ def is_config_update_question(text):
         "desactiva web search",
         "activá web search",
         "activa web search",
+        "max_output_tokens",
+        "tokens salida",
+        "máximo tokens",
+        "maximo tokens",
+        "probar config",
+        "probar configuración",
+        "test_config",
+        "prueba de configuración",
+        "prueba de configuracion",
     ]
     return any(trigger in t for trigger in triggers)
 
 def detect_direct_config_change(text):
     t = text.lower()
 
+    # Campo de prueba para verificar que el bot puede configurarse desde Telegram
+    if (
+        "probar config" in t
+        or "probar configuración" in t
+        or "test_config" in t
+        or "prueba de configuración" in t
+        or "prueba de configuracion" in t
+    ):
+        if "off" in t or "desactivar" in t or "apag" in t:
+            return {"test_config": "off"}
+        return {"test_config": "on"}
+
     # max_output_tokens
-    match = re.search(r"max_output_tokens\s*(a|=)?\s*(\d+)", t)
+    match = re.search(r"(max_output_tokens|maximo tokens|máximo tokens|tokens salida)\s*(a|=|en)?\s*(\d+)", t)
     if match:
-        return {"max_output_tokens": match.group(2)}
+        return {"max_output_tokens": match.group(3)}
 
     # modelo
-    match = re.search(r"(modelo|model)\s*(a|=)?\s*(gpt-[\w\.-]+)", t)
+    match = re.search(r"(modelo|model)\s*(a|=|en)?\s*(gpt-[\w\.-]+)", t)
     if match:
         return {"model": match.group(3)}
 
@@ -662,7 +685,8 @@ def normalize_config_value(key, value):
         "auto_publish_projects": {"true", "false"},
         "web_search": {"smart", "true", "false"},
         "model": ALLOWED_MODELS,
-        "max_output_tokens": {"500", "800", "1000", "1500", "2000"},
+        "max_output_tokens": {"500", "800", "1000", "1200", "1500", "2000"},
+        "test_config": {"on", "off"},
     }
 
     if key not in allowed_values:
@@ -775,6 +799,7 @@ CONFIGURACIÓN DINÁMICA ACTUAL:
 - Auto-publicar proyectos: {config.get("auto_publish_projects")}
 - Web search: {config.get("web_search")}
 - Modelo preferido: {config.get("model")}
+- Test configuración: {config.get("test_config")}
 
 APLICACIÓN DE CONFIGURACIÓN:
 - Si mode = gerente_general, actuá como gerente general ficticio operativo de Iván.
@@ -819,7 +844,8 @@ def format_config(config):
         f"- Auto-publicar proyectos: {config.get('auto_publish_projects')}\n"
         f"- Web search: {config.get('web_search')}\n"
         f"- Modelo: {config.get('model')}\n"
-        f"- Máximo tokens salida: {config.get('max_output_tokens')}"
+        f"- Máximo tokens salida: {config.get('max_output_tokens')}\n"
+        f"- Test config: {config.get('test_config')}"
     )
 
 
@@ -1577,7 +1603,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "- cambiá el modelo a gpt-4o-mini\n"
                         "- activá modo gerente\n"
                         "- respondé más corto\n"
-                        "- cambiá max_output_tokens a 1500"
+                        "- cambiá max_output_tokens a 1200\n"
+                        "- probar config"
                     )
 
         elif intent == "TIME_REMAINING":
