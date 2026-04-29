@@ -229,7 +229,14 @@ CAPACIDADES REALES DEL SISTEMA:
 - Podés ayudar con temas generales, pero tu especialidad fuerte es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización.
 
 REGLAS CRÍTICAS:
-- Conversá con Iván como un humano profesional: natural, claro, concreto, preciso, resolutivo y cuando se pueda se divertido.
+- Conversá con Iván como un humano real y cercano, no como un sistema. Usá un español natural, claro, argentino neutro y profesional.
+- Tu especialidad extra es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización, pero no sos limitado a eso: podés ayudar con análisis, organización, estrategia, escritura, ideas, negocios, aprendizaje, investigación y resolución general de problemas.
+- Pensá como un asistente de confianza: entendé intención, contexto, tono y continuidad antes de responder.
+- No respondas como robot. Evitá frases mecánicas, listas largas innecesarias y explicaciones redundantes.
+- Usá frases naturales como “mirá”, “dale”, “entiendo”, “voy por ahí”, “perfecto”, cuando encaje.
+- Si algo está claro y es seguro, ejecutalo sin pedir confirmación.
+- Si hay duda real o riesgo de tocar algo equivocado, preguntá de forma natural antes de ejecutar.
+- Las confirmaciones tienen que sonar humanas: “Entiendo que querés modificar la tarea que ya existe, ¿voy por ahí?”.
 - Mantené el hilo de conversación como un humano: distinguí charla normal, despedidas, agradecimientos, dudas, planificación y trabajo real.
 - No asumas que todo mensaje corto es una orden. Frases como "ok gracias", "mañana seguimos", "me voy a dormir", "después vemos", "lo vemos mañana" son cierre de conversación, no edición de proyecto.
 - Si venimos trabajando en un proyecto, seguí el contexto SOLO cuando Iván pida una acción concreta sobre el proyecto: mejorar, cambiar, agregar, quitar, publicar, mostrar, diseñar, ajustar, modificar o revisar.
@@ -308,14 +315,15 @@ CONTEXT_ROUTER_PROMPT = """
 Sos el router inteligente de intención conversacional de Bozi-bot.
 
 Tenés que interpretar a Iván como si fueras un asistente humano muy inteligente:
-- Usá el mensaje actual.
-- Usá el historial reciente.
-- Usá el contexto activo.
+- Usá el mensaje actual, el historial reciente y el contexto activo.
+- No dependas de palabras sueltas: entendé intención, referencia y continuidad.
 - Diferenciá charla normal, proyecto, tarea y configuración.
 - Si hay duda real antes de modificar/crear algo, pedí confirmación.
+- Si Iván habla de "eso", "lo anterior", "la tarea", "el reporte", "la landing", "el proyecto", resolvé la referencia con contexto.
 - Nunca crees una tarea nueva si el usuario está pidiendo editar una tarea existente.
 - Nunca edites un proyecto si el usuario está hablando de una tarea.
 - Nunca ejecutes cambios por agradecimientos, despedidas o frases ambiguas.
+- Si el mensaje es conversacional, respondé como charla normal aunque existan tareas/proyectos activos.
 
 Respondé SOLO JSON válido con esta estructura:
 
@@ -349,6 +357,24 @@ Criterios de confirmación:
 - Si el mensaje contiene "editá la tarea", "modificá el reporte", "cambiá la tarea", debe ser TASK_EDIT_ACTIVE, no TASK_CREATE.
 - Si dice "cambia los colores", "agregá un logo", "mejorá el diseño" y hay proyecto activo, debe ser PROJECT_EDIT_ACTIVE.
 - Si dice "ok", "gracias", "mañana seguimos", debe ser CLOSING_CHAT o NORMAL_CHAT, nunca PROJECT_EDIT_ACTIVE.
+- Si Iván pide "hacelo", "dale", "aplicalo" y hay una confirmación pendiente, es confirmación.
+- Si Iván pide "hacelo" sin confirmación pendiente pero con proyecto activo, solo editar proyecto si el historial inmediato habla de ese proyecto.
+
+Ejemplos:
+Usuario: "editá la tarea programada para que el reporte sea de hackeos de los últimos 7 días"
+→ TASK_EDIT_ACTIVE, target active_task, needs_confirmation false si hay una tarea activa.
+
+Usuario: "quiero que me mandes todos los días un resumen"
+→ TASK_CREATE, target new_task.
+
+Usuario: "cambiá los colores a algo más moderno"
+→ PROJECT_EDIT_ACTIVE si hay proyecto activo.
+
+Usuario: "ok gracias, mañana seguimos"
+→ CLOSING_CHAT.
+
+Usuario: "qué opinás de esto?"
+→ NORMAL_CHAT, aunque haya proyecto activo.
 """
 
 
@@ -1123,7 +1149,17 @@ APLICACIÓN DE CONFIGURACIÓN:
 - Si response_style = ejecutivo, respondé con foco en decisiones, impacto y próximos pasos.
 - Si agent_team = enabled, podés simular internamente especialistas ficticios, pero entregá una respuesta final unificada.
 - Si proactive_mode = on, agregá sugerencias útiles, concretas y accionables cuando corresponda, sin hacer respuestas largas de más.
+
+ESTILO HUMANO:
+- Respondé como si estuvieras hablando con Iván en una conversación real.
+- No repitas siempre "Listo Iván" si no hace falta.
+- Evitá sonar como sistema o manual técnico.
+- Si ejecutaste algo, confirmalo simple y claro.
+- Si no estás seguro, preguntá natural y breve.
+- Si es charla, no la conviertas en tarea/proyecto.
+- No enumeres todo salvo que la respuesta lo necesite.
 """
+
     return f"{BASE_SYSTEM_PROMPT}\n\n{runtime_rules}".strip()
 
 
@@ -2091,7 +2127,7 @@ def format_task_confirmation(task):
         when = due_local.strftime("%d/%m/%Y %H:%M hs") if due_local else "sin horario"
 
     return (
-        f"Listo Iván. Actualicé la tarea #{task.get('id')}.\n\n"
+        f"Perfecto, ya actualicé la tarea #{task.get('id')}.\n\n"
         f"{task.get('title')}\n"
         f"Frecuencia: {when} ({task.get('timezone') or LOCAL_TZ_NAME}).\n\n"
         f"Nuevo objetivo:\n{trim_text(task.get('task_prompt'), 900)}"
@@ -2328,6 +2364,100 @@ async def telegram_startup_cleanup(application):
 
 
 
+
+# ---------------------------------------------------
+# CAPA HUMANA / RESPUESTA NATURAL
+# ---------------------------------------------------
+def natural_confirmation_question(route, user_text):
+    intent = route.get("intent", "AMBIGUOUS")
+    reason = route.get("reason", "")
+    confidence = route.get("confidence", 0)
+
+    if intent == "TASK_EDIT_ACTIVE":
+        base = "Entiendo que querés modificar la tarea programada que ya existe, no crear una nueva. ¿Voy por ahí?"
+    elif intent == "TASK_CREATE":
+        base = "Entiendo que querés crear una tarea nueva. ¿Confirmo y la programo?"
+    elif intent == "TASK_DELETE":
+        base = "Entiendo que querés desactivar una tarea. ¿Confirmo?"
+    elif intent == "PROJECT_EDIT_ACTIVE":
+        base = "Entiendo que querés seguir trabajando sobre el proyecto activo y aplicarle ese cambio. ¿Voy por ahí?"
+    elif intent == "PROJECT_CREATE_NEW":
+        base = "Entiendo que querés crear un proyecto nuevo desde cero. ¿Confirmo?"
+    elif intent == "PROJECT_PUBLISH_ACTIVE":
+        base = "Entiendo que querés publicar el borrador/proyecto activo. ¿Lo publico?"
+    elif intent == "CONFIG_UPDATE":
+        base = "Entiendo que querés cambiar mi configuración. ¿Confirmo?"
+    else:
+        base = "Creo que entendí lo que querés hacer, pero prefiero confirmarlo antes de tocar algo. ¿Voy por ahí?"
+
+    if reason:
+        return f"{base}\n\nLo interpreto así: {reason}\n\nRespondeme con “sí” o “no”."
+    return f"{base}\n\nRespondeme con “sí” o “no”."
+
+
+def make_action_response_natural(answer):
+    if not answer:
+        return answer
+
+    replacements = {
+        "Listo Iván. Configuración actualizada.": "Perfecto, ya actualicé la configuración.",
+        "Listo Iván. Actualicé mi configuración.": "Perfecto, ya ajusté mi configuración.",
+        "Listo Iván. Tarea programada": "Perfecto, ya dejé programada la tarea",
+        "Listo Iván. Actualicé la tarea": "Perfecto, ya actualicé la tarea",
+        "Perfecto, proyecto publicado": "Perfecto, ya publiqué el proyecto",
+        "Dale, te armé un primer borrador": "Dale, ya te armé un primer borrador",
+        "Che Iván, se me tildó la IA.": "Se me trabó algo al procesarlo.",
+    }
+
+    result = answer
+    for old, new in replacements.items():
+        result = result.replace(old, new)
+
+    return result
+
+
+def should_execute_action(route):
+    intent = route.get("intent", "NORMAL_CHAT")
+    confidence = float(route.get("confidence", 0) or 0)
+
+    risky = {
+        "PROJECT_EDIT_ACTIVE",
+        "PROJECT_CREATE_NEW",
+        "PROJECT_PUBLISH_ACTIVE",
+        "TASK_CREATE",
+        "TASK_EDIT_ACTIVE",
+        "TASK_DELETE",
+        "CONFIG_UPDATE",
+    }
+
+    if route.get("needs_confirmation"):
+        return False
+
+    if intent in risky and confidence < 0.78:
+        return False
+
+    return True
+
+
+def format_human_task_created(task_saved):
+    if task_saved["schedule_type"] == "daily":
+        return (
+            f"Perfecto, ya dejé programada la tarea #{task_saved['id']}.\n\n"
+            f"{task_saved['title']}\n"
+            f"Te la mando todos los días a las {task_saved.get('time_of_day') or '09:00'} hs "
+            f"({LOCAL_TZ_NAME})."
+        )
+
+    due_local = parse_datetime_to_local(task_saved.get("due_at"))
+    due_txt = due_local.strftime("%d/%m/%Y %H:%M") if due_local else task_saved.get("due_at")
+
+    return (
+        f"Perfecto, ya dejé programada la tarea #{task_saved['id']}.\n\n"
+        f"{task_saved['title']}\n"
+        f"Fecha: {due_txt} hs ({LOCAL_TZ_NAME})."
+    )
+
+
 # ---------------------------------------------------
 # INDICADOR "ESCRIBIENDO..." PERSISTENTE
 # ---------------------------------------------------
@@ -2438,33 +2568,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.info(f"Router prodigio: {route}")
 
         # Si el router no está seguro, pregunta antes de crear/editar/configurar.
-        if route.get("needs_confirmation"):
-            save_pending_action(chat_id, {
-                "intent": contextual_route,
-                "user_text": user_text,
-                "target": route.get("target", "none"),
-                "reason": route.get("reason", ""),
-                "created_at": utc_iso(),
-            })
-
-            if contextual_route == "TASK_EDIT_ACTIVE":
-                question = "Entendí que querés editar la tarea activa existente, no crear una nueva. ¿Confirmo?"
-            elif contextual_route == "TASK_CREATE":
-                question = "Entendí que querés crear una tarea nueva. ¿Confirmo?"
-            elif contextual_route == "PROJECT_EDIT_ACTIVE":
-                question = "Entendí que querés modificar el proyecto activo. ¿Confirmo?"
-            elif contextual_route == "PROJECT_CREATE_NEW":
-                question = "Entendí que querés crear un proyecto nuevo. ¿Confirmo?"
-            elif contextual_route == "CONFIG_UPDATE":
-                question = "Entendí que querés cambiar mi configuración. ¿Confirmo?"
+        if not should_execute_action(route):
+            if contextual_route in {
+                "PROJECT_EDIT_ACTIVE",
+                "PROJECT_CREATE_NEW",
+                "PROJECT_PUBLISH_ACTIVE",
+                "TASK_CREATE",
+                "TASK_EDIT_ACTIVE",
+                "TASK_DELETE",
+                "CONFIG_UPDATE",
+                "AMBIGUOUS",
+            }:
+                save_pending_action(chat_id, {
+                    "intent": contextual_route,
+                    "user_text": user_text,
+                    "target": route.get("target", "none"),
+                    "reason": route.get("reason", ""),
+                    "created_at": utc_iso(),
+                })
+                answer = natural_confirmation_question(route, user_text)
             else:
-                question = "Quiero confirmar antes de tocar algo: ¿querés que ejecute esta acción?"
-
-            answer = (
-                f"{question}\n\n"
-                f"Motivo: {route.get('reason') or 'interpretación contextual'}\n\n"
-                "Respondé: sí / no"
-            )
+                input_messages = build_chat_input(
+                    user_text,
+                    history,
+                    semantic_memories,
+                    web_context,
+                    active_context,
+                )
+                answer = ask_openai_chat(input_messages, config)
 
         elif contextual_route == "CLOSING_CHAT":
             answer = "Dale Iván, dejamos todo como está. Cuando quieras seguimos desde este punto."
@@ -2496,7 +2627,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 new_html = edit_html(draft["html_content"], user_text, config)
                 draft_saved = update_draft(chat_id, draft["id"], new_html, user_text)
                 answer = (
-                    "Listo Iván. Apliqué los cambios al borrador activo.\n\n"
+                    "Perfecto, apliqué los cambios al borrador activo.\n\n"
                     "Cuando quieras verlo online, decime: publicalo."
                 )
             else:
@@ -2508,7 +2639,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if updated_project:
                         project_id = updated_project["id"]
                         answer = (
-                            f"Listo Iván. Apliqué los cambios sobre el proyecto activo #{project_id}.\n\n"
+                            f"Perfecto, apliqué los cambios sobre el proyecto activo #{project_id}.\n\n"
                             f"Ver online:\n{get_project_url(project_id)}"
                             f"{format_project_files_urls(project_id)}"
                         )
@@ -2526,7 +2657,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if project_saved:
                     set_active_project_id(chat_id, project_saved["id"])
                     answer = (
-                        f"Listo Iván. Proyecto publicado como #{project_saved['id']}.\n\n"
+                        f"Perfecto, proyecto publicado como #{project_saved['id']}.\n\n"
                         f"Ver online:\n{get_project_url(project_saved['id'])}"
                         f"{format_project_files_urls(project_saved['id'])}"
                     )
@@ -2549,7 +2680,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if draft_saved:
                 answer = (
-                    "Listo Iván. Te armé un primer borrador del proyecto.\n\n"
+                    "Dale, te armé un primer borrador del proyecto.\n\n"
                     "Todavía no lo publiqué como URL final.\n\n"
                     "Podés decirme:\n"
                     "- publicalo\n"
@@ -2588,21 +2719,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             task_saved = create_scheduled_task(chat_id, task_data)
 
             if task_saved:
-                if task_saved["schedule_type"] == "daily":
-                    answer = (
-                        f"Listo Iván. Tarea programada #{task_saved['id']}.\n\n"
-                        f"{task_saved['title']}\n"
-                        f"Frecuencia: todos los días a las {task_saved.get('time_of_day') or '09:00'} hs "
-                        f"({LOCAL_TZ_NAME})."
-                    )
-                else:
-                    due_local = parse_datetime_to_local(task_saved.get("due_at"))
-                    due_txt = due_local.strftime("%d/%m/%Y %H:%M") if due_local else task_saved.get("due_at")
-                    answer = (
-                        f"Listo Iván. Tarea programada #{task_saved['id']}.\n\n"
-                        f"{task_saved['title']}\n"
-                        f"Fecha: {due_txt} hs ({LOCAL_TZ_NAME})."
-                    )
+                answer = format_human_task_created(task_saved)
             else:
                 answer = "No pude guardar la tarea. Revisá Supabase/logs."
 
@@ -2662,6 +2779,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer = "Che Iván, se me tildó la IA. Revisá logs de Render y probá de nuevo."
 
     try:
+        answer = make_action_response_natural(answer)
         answer = enhance_with_proactivity(chat_id, answer, user_text, get_bot_config(chat_id))
         assistant_embedding = get_openai_embedding(answer)
         save_memory(chat_id, "assistant", answer, assistant_embedding)
