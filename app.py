@@ -474,6 +474,20 @@ def is_config_update_question(text):
     ]
     return any(trigger in t for trigger in triggers)
 
+def detect_direct_config_change(text):
+    t = text.lower()
+
+    # max_output_tokens
+    match = re.search(r"max_output_tokens\s*(a|=)?\s*(\d+)", t)
+    if match:
+        return {"max_output_tokens": match.group(2)}
+
+    # modelo
+    match = re.search(r"(modelo|model)\s*(a|=)?\s*(gpt-[\w\.-]+)", t)
+    if match:
+        return {"model": match.group(3)}
+
+    return {}
 
 def parse_datetime_to_local(value):
     if not value:
@@ -1528,28 +1542,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             answer = format_config(config)
 
         elif intent == "CONFIG_UPDATE":
-            changes = extract_config_changes(user_text)
-            config_saved = save_bot_config(chat_id, changes)
+    # 🔥 PRIMERO intento parser directo
+    direct_changes = detect_direct_config_change(user_text)
 
-            if config_saved:
-                new_config = get_bot_config(chat_id)
-                answer = (
-                    "Listo Iván. Actualicé mi configuración sin tocar GitHub ni Render.\n\n"
-                    "Cambios aplicados:\n"
-                    + "\n".join([f"- {k}: {v}" for k, v in config_saved.items()])
-                    + "\n\n"
-                    + format_config(new_config)
-                )
-            else:
-                answer = (
-                    "Entendí que querés cambiar mi configuración, pero no pude detectar un cambio válido.\n\n"
-                    "Ejemplos:\n"
-                    "- activá modo gerente\n"
-                    "- respondé más corto\n"
-                    "- usá tono ejecutivo\n"
-                    "- cambiá el modelo a gpt-4o-mini\n"
-                    "- desactivá web search"
-                )
+    if direct_changes:
+        config_saved = save_bot_config(chat_id, direct_changes)
+
+        if config_saved:
+            new_config = get_bot_config(chat_id)
+            answer = (
+                "Listo Iván. Configuración actualizada.\n\n"
+                + "\n".join([f"- {k}: {v}" for k, v in config_saved.items()])
+                + "\n\n"
+                + format_config(new_config)
+            )
+        else:
+            answer = "Detecté el cambio pero no pude guardarlo."
+    else:
+        # fallback a OpenAI
+        changes = extract_config_changes(user_text)
+        config_saved = save_bot_config(chat_id, changes)
+
+        if config_saved:
+            new_config = get_bot_config(chat_id)
+            answer = (
+                "Listo Iván. Actualicé mi configuración.\n\n"
+                + "\n".join([f"- {k}: {v}" for k, v in config_saved.items()])
+                + "\n\n"
+                + format_config(new_config)
+            )
+        else:
+            answer = (
+                "Entendí que querés cambiar mi configuración, pero no detecté un cambio válido.\n\n"
+                "Probá por ejemplo:\n"
+                "- cambiá el modelo a gpt-4o-mini\n"
+                "- activá modo gerente\n"
+                "- respondé más corto"
+            )
 
         elif intent == "TIME_REMAINING":
             task = get_latest_active_task(chat_id)
