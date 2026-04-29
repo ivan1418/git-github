@@ -81,6 +81,7 @@ DEFAULT_BOT_CONFIG = {
     "max_output_tokens": str(MAX_OUTPUT_TOKENS),
     "test_config": "off",
     "active_project_id": "",
+    "proactive_mode": "off",
 }
 
 if not TELEGRAM_TOKEN:
@@ -365,7 +366,8 @@ Campos posibles:
   "web_search": "smart | true | false",
   "model": "gpt-4o-mini | gpt-4.1-mini | gpt-4.1 | gpt-4o",
   "max_output_tokens": "500 | 800 | 1000 | 1200 | 1500 | 2000",
-  "test_config": "on | off"
+  "test_config": "on | off",
+  "proactive_mode": "on | off"
 }
 
 Reglas:
@@ -541,11 +543,23 @@ def is_config_update_question(text):
         "test_config",
         "prueba de configuración",
         "prueba de configuracion",
+        "modo proactivo",
+        "proactivo",
+        "propone mejoras",
+        "proponé mejoras",
+        "sugerencias automáticas",
+        "sugerencias automaticas",
     ]
     return any(trigger in t for trigger in triggers)
 
 def detect_direct_config_change(text):
     t = text.lower()
+
+    # Modo proactivo real
+    if "modo proactivo" in t or "proactivo" in t or "propone mejoras" in t or "proponé mejoras" in t:
+        if "off" in t or "desactivar" in t or "apag" in t:
+            return {"proactive_mode": "off"}
+        return {"proactive_mode": "on"}
 
     # Campo de prueba para verificar que el bot puede configurarse desde Telegram
     if (
@@ -616,6 +630,76 @@ def calculate_time_remaining(due_at_str):
     except Exception as e:
         logging.error(f"Error calculando tiempo restante: {e}")
         return "No pude calcular el tiempo restante."
+
+
+
+# ---------------------------------------------------
+# MODO PROACTIVO REAL
+# ---------------------------------------------------
+def is_proactive_enabled(config):
+    return config.get("proactive_mode") == "on"
+
+
+def generate_proactive_suggestions(chat_id, user_text, answer, config):
+    suggestions = []
+    t = (user_text or "").lower()
+    answer_l = (answer or "").lower()
+
+    active_project = get_active_project(chat_id)
+
+    if active_project and any(k in t for k in ["cambia", "cambiá", "mejora", "mejorá", "agrega", "agregá", "colores", "logo", "diseño", "landing", "web"]):
+        suggestions.append("Revisar contraste, CTA principal y versión mobile del proyecto activo.")
+        suggestions.append("Agregar una sección de confianza: beneficios, casos de uso o testimonios.")
+        suggestions.append("Publicar una versión revisada y probarla desde el celular.")
+
+    if "tarea" in t or "reporte" in t:
+        suggestions.append("Crear una tarea diaria o semanal para automatizar este seguimiento.")
+        suggestions.append("Definir horario fijo y objetivo del reporte para evitar ruido.")
+
+    if "error" in t or "fall" in t or "logs" in t:
+        suggestions.append("Ejecutar /health y revisar /errors antes de tocar código.")
+        suggestions.append("Guardar el error como evento para detectar si se repite.")
+
+    if "proyecto" in t or "landing" in t or "web" in t:
+        suggestions.append("Mantener flujo draft_first: primero iteramos, después publicamos.")
+        suggestions.append("Separar contenido, diseño y funcionalidades para mejorar más rápido.")
+
+    try:
+        max_tokens = int(config.get("max_output_tokens", MAX_OUTPUT_TOKENS))
+        if max_tokens >= 1500:
+            suggestions.append("Si querés bajar costo, probá max_output_tokens en 1200.")
+    except Exception:
+        pass
+
+    if config.get("mode") != "gerente_general":
+        suggestions.append("Activar modo gerente_general para que priorice decisiones y próximos pasos.")
+
+    if not suggestions and len(answer_l) > 0:
+        suggestions.append("Puedo convertir esto en tarea, proyecto o checklist si querés avanzar más ordenado.")
+
+    # Deduplicar preservando orden
+    unique = []
+    for s in suggestions:
+        if s not in unique:
+            unique.append(s)
+
+    return unique[:3]
+
+
+def enhance_with_proactivity(chat_id, answer, user_text, config):
+    if not is_proactive_enabled(config):
+        return answer
+
+    suggestions = generate_proactive_suggestions(chat_id, user_text, answer, config)
+
+    if not suggestions:
+        return answer
+
+    extra = ["", "💡 Sugerencias proactivas:"]
+    for i, suggestion in enumerate(suggestions, start=1):
+        extra.append(f"{i}. {suggestion}")
+
+    return answer.rstrip() + "\n" + "\n".join(extra)
 
 
 # ---------------------------------------------------
@@ -749,6 +833,7 @@ def normalize_config_value(key, value):
         "model": ALLOWED_MODELS,
         "max_output_tokens": {"500", "800", "1000", "1200", "1500", "2000"},
         "test_config": {"on", "off"},
+        "proactive_mode": {"on", "off"},
     }
 
     if key not in allowed_values:
@@ -862,6 +947,7 @@ CONFIGURACIÓN DINÁMICA ACTUAL:
 - Web search: {config.get("web_search")}
 - Modelo preferido: {config.get("model")}
 - Test configuración: {config.get("test_config")}
+- Modo proactivo: {config.get("proactive_mode")}
 
 APLICACIÓN DE CONFIGURACIÓN:
 - Si mode = gerente_general, actuá como gerente general ficticio operativo de Iván.
@@ -873,6 +959,7 @@ APLICACIÓN DE CONFIGURACIÓN:
 - Si detail_level = alto, respondé con más profundidad y estructura.
 - Si response_style = ejecutivo, respondé con foco en decisiones, impacto y próximos pasos.
 - Si agent_team = enabled, podés simular internamente especialistas ficticios, pero entregá una respuesta final unificada.
+- Si proactive_mode = on, agregá sugerencias útiles, concretas y accionables cuando corresponda, sin hacer respuestas largas de más.
 """
     return f"{BASE_SYSTEM_PROMPT}\n\n{runtime_rules}".strip()
 
@@ -1064,7 +1151,8 @@ def format_config(config):
         f"- Modelo: {config.get('model')}\n"
         f"- Máximo tokens salida: {config.get('max_output_tokens')}\n"
         f"- Test config: {config.get('test_config')}\n"
-        f"- Proyecto activo: {config.get('active_project_id') or 'ninguno'}"
+        f"- Proyecto activo: {config.get('active_project_id') or 'ninguno'}\n"
+        f"- Modo proactivo: {config.get('proactive_mode')}"
     )
 
 
@@ -2185,6 +2273,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_event(chat_id, "error", f"Error procesando mensaje: {e}")
         answer = "Che Iván, se me tildó la IA. Revisá logs de Render y probá de nuevo."
 
+    answer = enhance_with_proactivity(chat_id, answer, user_text, get_bot_config(chat_id))
+
     assistant_embedding = get_openai_embedding(answer)
     save_memory(chat_id, "assistant", answer, assistant_embedding)
 
@@ -2785,6 +2875,7 @@ def apply_diagnostic_suggestions(chat_id):
         "agent_team": "enabled",
         "project_behavior": "draft_first",
         "auto_publish_projects": "false",
+        "proactive_mode": "on",
     }
 
     try:
