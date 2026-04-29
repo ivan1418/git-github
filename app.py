@@ -230,12 +230,12 @@ CAPACIDADES REALES DEL SISTEMA:
 
 REGLAS CRÍTICAS:
 - Conversá con Iván como un humano real, profesional y cercano. Natural, claro, concreto, resolutivo y con buen humor cuando amerite.
-- No seas un bot rígido ni dependas de palabras sueltas: interpretá contexto, intención, referencias como "eso", "lo anterior", "la tarea", "el proyecto" y el hilo de la charla.
+- No seas un bot rígido ni dependas de palabras sueltas: interpretá contexto, intención, referencias como "eso", "lo anterior", "la tarea", "el proyecto" y el hilo de la charla, pero no fuerces relación con un proyecto/tarea si Iván pregunta otra cosa.
 - Tu especialidad fuerte es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización, pero podés ayudar con temas generales: análisis, escritura, negocios, organización, aprendizaje, investigación y resolución de problemas.
 - Si Iván manda una imagen/captura, analizala como evidencia visual: detectá errores, pantallas, mensajes, logs, configuraciones y explicá problema + solución.
 - Mantené el hilo de conversación como un humano: distinguí charla normal, despedidas, agradecimientos, dudas, planificación y trabajo real.
 - No asumas que todo mensaje corto es una orden. Frases como "ok gracias", "mañana seguimos", "me voy a dormir", "después vemos", "lo vemos mañana" son cierre de conversación, no edición de proyecto.
-- Si venimos trabajando en un proyecto, seguí el contexto SOLO cuando Iván pida una acción concreta sobre el proyecto: mejorar, cambiar, agregar, quitar, publicar, mostrar, diseñar, ajustar, modificar o revisar.
+- Si venimos trabajando en un proyecto, seguí el contexto SOLO cuando Iván pida una acción concreta sobre el proyecto: mejorar, cambiar, agregar, quitar, publicar, mostrar, diseñar, ajustar, modificar o revisar. Si pregunta otra cosa, respondé esa otra cosa sin atarlo al proyecto.
 - Si Iván da órdenes sueltas como "mejoralo", "cambialo", "hacelo más moderno", "publicalo", interpretalas según el proyecto activo.
 - Si existe un proyecto activo, los pedidos de diseño, colores, logo, secciones, mejoras visuales, textos, estructura o publicación deben aplicarse a ese proyecto.
 - Si Iván agradece, se despide o dice que continúa mañana, respondé cordialmente sin ejecutar cambios.
@@ -243,7 +243,7 @@ REGLAS CRÍTICAS:
 - Podés usar humor liviano, comentarios simpáticos o guiños naturales cuando el contexto lo permita, pero nunca cuando haya errores graves, temas sensibles, seguridad crítica o frustración del usuario.
 - El humor debe sentirse humano y breve, no forzado ni infantil.
 - No pidas confirmaciones innecesarias cuando la intención sea razonable y segura.
-- Proponé mejoras útiles cuando detectes una oportunidad, pero sin llenar la respuesta de texto innecesario.
+- Proponé mejoras útiles solo cuando Iván lo pida o cuando esté claramente trabajando sobre una tarea/proyecto/error. No agregues sugerencias proactivas en saludos, agradecimientos, charla casual o consultas generales.
 - Cuando Iván mencione agentes, equipo, contratar agentes o gerente general, interpretalo como roles ficticios internos del bot.
 - No sugieras LinkedIn, reclutamiento ni contratación real salvo que Iván lo pida explícitamente.
 - Nunca digas que no podés programar tareas si el usuario pide una tarea compatible.
@@ -300,7 +300,8 @@ Sos el router inteligente de Bozi-bot. Interpretás a Iván como un asistente hu
 
 Objetivo:
 - Entender qué quiso hacer Iván usando mensaje actual + historial + contexto activo.
-- Diferenciar charla normal, proyecto, tarea, configuración e imagen.
+- El contexto activo es SOLO referencia, no una obligación. No ates una consulta nueva a un proyecto/tarea si el mensaje actual no lo pide.
+- Diferenciar charla normal, consulta general, proyecto, tarea, configuración e imagen.
 - No depender de palabras sueltas.
 - Si hay riesgo de tocar algo equivocado, pedir confirmación.
 - Si está claro y es seguro, ejecutar sin molestar.
@@ -316,8 +317,8 @@ Respondé SOLO JSON válido:
 }
 
 Reglas:
-- NORMAL_CHAT: charla, duda, comentario, análisis, consulta o conversación sin cambios.
-- CLOSING_CHAT: "gracias", "mañana seguimos", "me voy a dormir", "después vemos", pausa o cierre.
+- NORMAL_CHAT: saludo, charla, duda, comentario, análisis, consulta general o conversación sin cambios.
+- CLOSING_CHAT: "gracias", "ok gracias", "mañana seguimos", "me voy a dormir", "después vemos", pausa o cierre.
 - PROJECT_CREATE_NEW: crear desde cero una landing, web, página, dashboard, app, interfaz o proyecto visual.
 - PROJECT_EDIT_ACTIVE: modificar proyecto existente: colores, logo, textos, secciones, diseño, responsive, hacerlo moderno/elegante.
 - PROJECT_SHOW_ACTIVE: ver URL, mostrar borrador/proyecto o revisar cómo quedó.
@@ -332,6 +333,13 @@ Reglas:
 - IMAGE_ANALYSIS: analizar captura, error, pantalla, imagen, evidencia visual.
 - AMBIGUOUS: no estás seguro si debe crear/editar/tocar algo.
 
+Reglas anti-anclaje:
+- Si Iván pregunta algo general, respondé NORMAL_CHAT aunque haya proyecto o tarea activa.
+- Si el mensaje no menciona explícitamente tarea/reporte o no refiere claramente a una tarea previa, no uses TASK_EDIT_ACTIVE.
+- Si el mensaje no menciona explícitamente proyecto/web/landing/diseño/URL o no refiere claramente al proyecto previo, no uses PROJECT_EDIT_ACTIVE.
+- Un saludo como "hola", "buenas", "qué onda", "cómo estás" siempre es NORMAL_CHAT.
+- "ok", "dale", "perfecto", "gracias" no ejecuta nada salvo que haya una confirmación pendiente manejada fuera del router.
+
 Confirmación:
 - needs_confirmation=false si la intención y objetivo están claros.
 - needs_confirmation=true si puede crear, borrar, editar o cambiar algo equivocado.
@@ -342,12 +350,15 @@ Confirmación:
 - Si dice "sí", "dale", "hacelo" y hay confirmación pendiente, es confirmación.
 
 Ejemplos:
+"hola" -> NORMAL_CHAT, target none.
+"qué es Docker?" -> NORMAL_CHAT, target none, aunque haya proyecto activo.
 "editá la tarea para que el reporte sea de los últimos 7 días" -> TASK_EDIT_ACTIVE, target active_task.
 "mandame todos los días un reporte" -> TASK_CREATE, target new_task.
 "cambiá los colores y agregá un logo" -> PROJECT_EDIT_ACTIVE si hay proyecto activo.
 "mirá esta captura, qué error hay?" -> IMAGE_ANALYSIS, target image.
 "qué opinás?" -> NORMAL_CHAT.
 """
+
 
 
 
@@ -710,6 +721,54 @@ def is_smalltalk_only(text):
     return t in neutral
 
 
+def is_simple_greeting(text):
+    t = (text or "").lower().strip()
+    greetings = {
+        "hola", "buenas", "buen dia", "buen día", "buenas tardes",
+        "buenas noches", "hey", "hi", "hello", "qué tal", "que tal",
+        "como estas", "cómo estás", "como va", "cómo va", "que onda", "qué onda"
+    }
+    return t in greetings
+
+
+def is_short_casual_message(text):
+    t = (text or "").lower().strip()
+    if not t:
+        return True
+
+    words = t.split()
+    casual_words = {
+        "hola", "buenas", "ok", "dale", "gracias", "joya", "perfecto",
+        "genial", "excelente", "listo", "bueno", "jaja", "jajaja"
+    }
+
+    return len(words) <= 3 and all(w.strip("!¡?.:,;") in casual_words for w in words)
+
+
+def explicitly_asks_for_suggestions(text):
+    t = (text or "").lower()
+    triggers = [
+        "sugerime", "sugerí", "sugeri", "recomendame", "recomenda", "recomendá",
+        "qué propones", "que propones", "qué me proponés", "que me propones",
+        "propone", "proponé", "mejoras", "qué mejorar", "que mejorar",
+        "diagnóstico", "diagnostico", "analizá y proponé", "analiza y propone"
+    ]
+    return any(trigger in t for trigger in triggers)
+
+
+def should_suppress_proactivity(user_text, answer=""):
+    t = (user_text or "").lower().strip()
+
+    if is_conversation_closing(t) or is_smalltalk_only(t) or is_simple_greeting(t) or is_short_casual_message(t):
+        return True
+
+    # Si es una consulta general corta, no meter sugerencias que la aten a tareas/proyectos.
+    if len(t.split()) <= 6 and not explicitly_asks_for_suggestions(t):
+        return True
+
+    return False
+
+
 def has_explicit_project_action(text):
     t = (text or "").lower()
     project_words = [
@@ -805,41 +864,46 @@ def is_proactive_enabled(config):
 def generate_proactive_suggestions(chat_id, user_text, answer, config):
     suggestions = []
     t = (user_text or "").lower()
-    answer_l = (answer or "").lower()
 
+    # No sugerir nada si Iván no lo pidió o si no está claramente trabajando en algo accionable.
+    wants_suggestions = explicitly_asks_for_suggestions(t)
     active_project = get_active_project(chat_id)
 
-    if active_project and any(k in t for k in ["cambia", "cambiá", "mejora", "mejorá", "agrega", "agregá", "colores", "logo", "diseño", "landing", "web"]):
+    project_action = active_project and any(k in t for k in [
+        "cambia", "cambiá", "mejora", "mejorá", "agrega", "agregá",
+        "colores", "logo", "diseño", "landing", "web", "proyecto",
+        "publicar", "publicalo", "sección", "seccion", "botón", "boton"
+    ])
+
+    task_action = any(k in t for k in [
+        "tarea", "reporte", "recordatorio", "programada", "programar",
+        "todos los días", "diario", "diaria", "agendar", "agenda"
+    ])
+
+    error_action = any(k in t for k in [
+        "error", "fall", "falla", "logs", "render", "supabase", "telegram",
+        "openai", "deploy", "no funciona", "rompió", "rompio"
+    ])
+
+    if not (wants_suggestions or project_action or task_action or error_action):
+        return []
+
+    if project_action:
         suggestions.append("Revisar contraste, CTA principal y versión mobile del proyecto activo.")
         suggestions.append("Agregar una sección de confianza: beneficios, casos de uso o testimonios.")
-        suggestions.append("Publicar una versión revisada y probarla desde el celular.")
+        suggestions.append("Probar la versión publicada desde el celular.")
 
-    if "tarea" in t or "reporte" in t:
-        suggestions.append("Crear una tarea diaria o semanal para automatizar este seguimiento.")
-        suggestions.append("Definir horario fijo y objetivo del reporte para evitar ruido.")
+    if task_action:
+        suggestions.append("Definir bien el objetivo del reporte para evitar resultados muy genéricos.")
+        suggestions.append("Si el reporte depende de noticias actuales, conviene mantener web search activo.")
 
-    if "error" in t or "fall" in t or "logs" in t:
+    if error_action:
         suggestions.append("Ejecutar /health y revisar /errors antes de tocar código.")
         suggestions.append("Guardar el error como evento para detectar si se repite.")
 
-    if "proyecto" in t or "landing" in t or "web" in t:
-        suggestions.append("Mantener flujo draft_first: primero iteramos, después publicamos.")
-        suggestions.append("Separar contenido, diseño y funcionalidades para mejorar más rápido.")
+    if wants_suggestions and not suggestions:
+        suggestions.append("Puedo convertir esto en checklist, tarea o plan de acción si querés ordenarlo mejor.")
 
-    try:
-        max_tokens = int(config.get("max_output_tokens", MAX_OUTPUT_TOKENS))
-        if max_tokens >= 1500:
-            suggestions.append("Si querés bajar costo, probá max_output_tokens en 1200.")
-    except Exception:
-        pass
-
-    if config.get("mode") != "gerente_general":
-        suggestions.append("Activar modo gerente_general para que priorice decisiones y próximos pasos.")
-
-    if not suggestions and len(answer_l) > 0:
-        suggestions.append("Puedo convertir esto en tarea, proyecto o checklist si querés avanzar más ordenado.")
-
-    # Deduplicar preservando orden
     unique = []
     for s in suggestions:
         if s not in unique:
@@ -847,11 +911,10 @@ def generate_proactive_suggestions(chat_id, user_text, answer, config):
 
     return unique[:3]
 
-
 def enhance_with_proactivity(chat_id, answer, user_text, config):
-    # No meter sugerencias cuando Iván está cerrando, agradeciendo o respondiendo algo corto.
-    # Esto hace que el bot se sienta mucho más humano y menos insistente.
-    if is_conversation_closing(user_text) or is_smalltalk_only(user_text):
+    # No meter sugerencias en saludos, cierres, agradecimientos, respuestas cortas o charla casual.
+    # Esto evita que el bot quede atado a tareas/proyectos cuando Iván consulta otra cosa.
+    if should_suppress_proactivity(user_text, answer):
         return answer
 
     if not is_proactive_enabled(config):
@@ -950,8 +1013,9 @@ def describe_agent_team():
 def describe_cost_mode():
     return (
         "Modo costo actual:\n\n"
-        f"- Modelo principal: {OPENAI_MODEL}\n" f"- Modelo visión: {OPENAI_VISION_MODEL}\n"
-        f"- Modelo visión: {OPENAI_VISION_MODEL}\n" f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
+        f"- Modelo principal: {OPENAI_MODEL}\n"
+        f"- Modelo visión: {OPENAI_VISION_MODEL}\n"
+        f"- Modelo embeddings: {OPENAI_EMBEDDING_MODEL}\n"
         f"- Máximo tokens salida: {MAX_OUTPUT_TOKENS}\n"
         f"- Web search: {USE_WEB_SEARCH}\n\n"
         "Recomendación:\n"
@@ -1199,7 +1263,8 @@ def build_active_context(chat_id):
                 f"modo={config.get('mode')}, "
                 f"detalle={config.get('detail_level')}, "
                 f"modelo={config.get('model')}, "
-                f"tokens={config.get('max_output_tokens')}"
+                f"tokens={config.get('max_output_tokens')}. "
+                "Usar esta info solo si aporta a la respuesta."
             )
     except Exception:
         pass
@@ -1208,9 +1273,9 @@ def build_active_context(chat_id):
         active_project = get_active_project(chat_id)
         if active_project:
             context_lines.append(
-                "Proyecto activo: "
+                "Proyecto activo como referencia, NO como obligación: "
                 f"#{active_project.get('id')} - {active_project.get('title')}. "
-                "Si Iván pide cambios visuales, textos, secciones, logo, colores, mejoras o publicación, aplicarlos a este proyecto."
+                "Solo usarlo si Iván pide claramente continuar, mostrar, publicar o modificar ese proyecto."
             )
     except Exception:
         pass
@@ -1218,7 +1283,10 @@ def build_active_context(chat_id):
     try:
         active_tasks = [t for t in list_tasks(chat_id) if t.get("is_active")]
         if active_tasks:
-            context_lines.append(f"Tareas activas: {len(active_tasks)}.")
+            context_lines.append(
+                f"Tareas activas como referencia, NO como obligación: {len(active_tasks)}. "
+                "Solo usarlas si Iván habla claramente de tareas, reportes o recordatorios."
+            )
     except Exception:
         pass
 
@@ -1437,6 +1505,7 @@ Contexto activo:
             "TASK_LIST",
             "TASK_DELETE",
             "TIME_REMAINING",
+            "IMAGE_ANALYSIS",
             "AMBIGUOUS",
         }
 
@@ -2297,7 +2366,11 @@ def build_chat_input(user_text, history, semantic_memories, web_context, active_
     if active_context:
         messages.append({
             "role": "user",
-            "content": "Contexto activo de trabajo:\n" + active_context,
+            "content": (
+                "Contexto disponible para continuidad. "
+                "No lo uses si el mensaje actual es una consulta independiente.\n"
+                + active_context
+            ),
         })
 
     if semantic_memories:
@@ -2581,6 +2654,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Todos los días a las 9 mandame un reporte de ciberseguridad."
             )
             answer = enhance_with_proactivity(chat_id, answer, user_text, config)
+            save_memory(chat_id, "user", user_text, get_openai_embedding(user_text))
+            save_memory(chat_id, "assistant", answer, get_openai_embedding(answer))
+            stop_typing()
+            await update.message.reply_text(answer)
+            return
+
+        if is_simple_greeting(user_text):
+            answer = "Hola Iván 👋 ¿cómo viene todo?"
             save_memory(chat_id, "user", user_text, get_openai_embedding(user_text))
             save_memory(chat_id, "assistant", answer, get_openai_embedding(answer))
             stop_typing()
