@@ -307,46 +307,50 @@ TIME_REMAINING = pregunta cuánto falta, cuándo es, a qué hora, o cuánto tiem
 CONTEXT_ROUTER_PROMPT = """
 Sos el router inteligente de intención conversacional de Bozi-bot.
 
-Tu tarea es decidir qué quiso hacer Iván considerando:
-- mensaje actual
-- historial reciente
-- contexto activo
-- proyecto activo si existe
+Tenés que interpretar a Iván como si fueras un asistente humano muy inteligente:
+- Usá el mensaje actual.
+- Usá el historial reciente.
+- Usá el contexto activo.
+- Diferenciá charla normal, proyecto, tarea y configuración.
+- Si hay duda real antes de modificar/crear algo, pedí confirmación.
+- Nunca crees una tarea nueva si el usuario está pidiendo editar una tarea existente.
+- Nunca edites un proyecto si el usuario está hablando de una tarea.
+- Nunca ejecutes cambios por agradecimientos, despedidas o frases ambiguas.
 
-Respondé SOLO una etiqueta:
+Respondé SOLO JSON válido con esta estructura:
 
-NORMAL_CHAT
-CLOSING_CHAT
-PROJECT_EDIT_ACTIVE
-PROJECT_SHOW_ACTIVE
-PROJECT_PUBLISH_ACTIVE
-PROJECT_CREATE_NEW
-CONFIG_UPDATE
-CONFIG_VIEW
-TASK_CREATE
-TASK_LIST
-TIME_REMAINING
+{
+  "intent": "NORMAL_CHAT | CLOSING_CHAT | PROJECT_EDIT_ACTIVE | PROJECT_SHOW_ACTIVE | PROJECT_PUBLISH_ACTIVE | PROJECT_CREATE_NEW | CONFIG_UPDATE | CONFIG_VIEW | TASK_CREATE | TASK_EDIT_ACTIVE | TASK_LIST | TASK_DELETE | TIME_REMAINING | AMBIGUOUS",
+  "confidence": 0.0,
+  "needs_confirmation": true,
+  "target": "none | active_project | active_task | new_project | new_task | config",
+  "reason": "explicación breve"
+}
 
-Criterios:
-NORMAL_CHAT = charla normal, duda, comentario, agradecimiento, planificación, reflexión, conversación humana o algo que NO debe ejecutar cambios.
-CLOSING_CHAT = despedida, pausa, "mañana seguimos", "me voy a dormir", "después vemos", "gracias", "buenas noches".
-PROJECT_EDIT_ACTIVE = quiere modificar el proyecto activo existente: cambiar colores, diseño, logo, textos, secciones, estilo, hacerlo moderno, atractivo, responsive, mejorar.
-PROJECT_SHOW_ACTIVE = quiere ver el proyecto activo, la URL, cómo va, mostrar borrador o revisar estado.
-PROJECT_PUBLISH_ACTIVE = quiere publicar el borrador actual o confirmar publicación.
-PROJECT_CREATE_NEW = pide crear una página, landing, dashboard, app, sitio o proyecto nuevo desde cero.
-CONFIG_UPDATE = quiere cambiar configuración del bot: modo, modelo, tokens, estilo, proactividad, detalle.
-CONFIG_VIEW = quiere ver configuración, modelos o estado de configuración.
-TASK_CREATE = quiere crear/agendar/programar recordatorio o reporte.
-TASK_LIST = quiere ver tareas.
-TIME_REMAINING = pregunta cuánto falta, cuándo es o tiempo restante.
+Reglas de decisión:
+- NORMAL_CHAT: charla, duda, comentario, análisis, agradecimiento parcial, planificación o conversación que no debe tocar nada.
+- CLOSING_CHAT: despedida o pausa: "mañana seguimos", "gracias", "me voy a dormir", "después vemos".
+- PROJECT_CREATE_NEW: pide crear desde cero una landing, web, página, app, dashboard o proyecto.
+- PROJECT_EDIT_ACTIVE: pide modificar un proyecto existente: colores, logo, textos, diseño, secciones, hacerlo moderno/elegante, mejorar landing, etc.
+- PROJECT_SHOW_ACTIVE: pide ver URL, mostrar borrador, ver cómo quedó, mostrar proyecto.
+- PROJECT_PUBLISH_ACTIVE: pide publicar el borrador/proyecto.
+- TASK_CREATE: pide crear/agendar/programar una tarea o reporte nuevo.
+- TASK_EDIT_ACTIVE: pide editar/modificar/cambiar una tarea o reporte ya programado.
+- TASK_LIST: pide ver/listar tareas.
+- TASK_DELETE: pide borrar/cancelar/desactivar una tarea.
+- CONFIG_UPDATE: pide cambiar comportamiento, modo, modelo, tokens, proactividad o configuración.
+- CONFIG_VIEW: pide ver configuración/modelos.
+- TIME_REMAINING: pregunta cuánto falta, cuándo es o tiempo restante.
+- AMBIGUOUS: no estás seguro si debe editar tarea, proyecto o crear algo nuevo.
 
-Reglas importantes:
-- No clasifiques como PROJECT_EDIT_ACTIVE solo porque exista proyecto activo.
-- Si Iván dice "mañana seguimos", "ok gracias", "me voy a dormir", es CLOSING_CHAT.
-- Si Iván habla de otra cosa mientras existe proyecto activo, es NORMAL_CHAT.
-- Si luego vuelve con "seguimos con la landing", "ahora cambiá colores", "mejorala", es PROJECT_EDIT_ACTIVE.
-- Ante duda entre editar proyecto o charla normal, elegí NORMAL_CHAT.
+Criterios de confirmación:
+- needs_confirmation=false si la intención y el objetivo están claros.
+- needs_confirmation=true si hay riesgo de crear/editar algo incorrecto.
+- Si el mensaje contiene "editá la tarea", "modificá el reporte", "cambiá la tarea", debe ser TASK_EDIT_ACTIVE, no TASK_CREATE.
+- Si dice "cambia los colores", "agregá un logo", "mejorá el diseño" y hay proyecto activo, debe ser PROJECT_EDIT_ACTIVE.
+- Si dice "ok", "gracias", "mañana seguimos", debe ser CLOSING_CHAT o NORMAL_CHAT, nunca PROJECT_EDIT_ACTIVE.
 """
+
 
 
 TASK_EXTRACT_PROMPT = f"""
@@ -369,6 +373,36 @@ Reglas:
 - Si dice mañana, una vez, hoy, o fecha específica, schedule_type = once.
 - Si no indica hora, usar 09:00.
 - Si el usuario dice "hoy a las 16:45", crear due_at para hoy a las 16:45 en zona horaria Argentina/Buenos_Aires.
+- No agregues texto fuera del JSON.
+"""
+
+
+
+TASK_EDIT_EXTRACT_PROMPT = f"""
+Extraé cambios para actualizar una tarea programada existente.
+
+Contexto:
+- Ya existe una tarea.
+- El usuario puede pedir cambiar el tema del reporte, frecuencia, horario o alcance.
+- Si no pide cambiar horario/frecuencia, dejá esos campos en null para mantenerlos.
+
+Devolvé SOLO JSON válido:
+
+{
+  "title": "nuevo título corto o null",
+  "task_prompt": "nuevo pedido completo que debe ejecutarse o null",
+  "schedule_type": "daily | once | null",
+  "time_of_day": "HH:MM | null",
+  "due_at": "YYYY-MM-DDTHH:MM:SS-03:00 | null",
+  "timezone": "{LOCAL_TZ_NAME}"
+}
+
+Reglas:
+- Si el usuario dice "sobre los últimos 7 días", incorporalo en task_prompt.
+- Si dice "todos los días", schedule_type = daily.
+- Si no menciona hora, time_of_day = null.
+- Si no menciona cambiar frecuencia, schedule_type = null.
+- No inventes cambios no pedidos.
 - No agregues texto fuera del JSON.
 """
 
@@ -654,6 +688,111 @@ def calculate_time_remaining(due_at_str):
     except Exception as e:
         logging.error(f"Error calculando tiempo restante: {e}")
         return "No pude calcular el tiempo restante."
+
+
+
+def is_conversation_closing(text):
+    t = (text or "").lower().strip()
+    patterns = [
+        "gracias", "ok gracias", "dale gracias", "perfecto gracias",
+        "mañana seguimos", "manana seguimos", "después vemos", "despues vemos",
+        "me voy a dormir", "buenas noches", "hasta mañana", "hasta manana",
+        "seguimos mañana", "seguimos manana", "lo vemos mañana", "lo vemos manana",
+    ]
+    return t in patterns or any(p in t for p in patterns)
+
+
+def is_smalltalk_only(text):
+    t = (text or "").lower().strip()
+    neutral = {
+        "ok", "dale", "perfecto", "genial", "excelente", "joya",
+        "bien", "listo", "bueno", "buenísimo", "buenisimo"
+    }
+    return t in neutral
+
+
+def has_explicit_project_action(text):
+    t = (text or "").lower()
+    project_words = [
+        "landing", "web", "página", "pagina", "sitio", "proyecto",
+        "borrador", "url", "diseño", "diseño", "colores", "logo",
+        "sección", "seccion", "botón", "boton", "hero", "footer",
+        "header", "contacto", "publicalo", "publicala"
+    ]
+    action_words = [
+        "cambia", "cambiá", "modifica", "modificá", "mejora", "mejorá",
+        "agrega", "agregá", "añade", "añadí", "quita", "quitá",
+        "saca", "sacá", "ajusta", "ajustá", "diseña", "diseñá",
+        "hacelo", "hacela", "mostrame", "mostrar", "ver", "publica", "publicá"
+    ]
+    return any(a in t for a in action_words) and any(w in t for w in project_words)
+
+
+def is_yes_confirmation(text):
+    t = (text or "").lower().strip()
+    return t in {"si", "sí", "ok", "dale", "confirmo", "correcto", "exacto", "hacelo", "aplicalo", "sí confirmo", "si confirmo"}
+
+
+def is_no_confirmation(text):
+    t = (text or "").lower().strip()
+    return t in {"no", "cancelar", "cancela", "no hagas nada", "dejalo", "mejor no", "pará", "para"}
+
+
+def set_internal_state(chat_id, key, value):
+    try:
+        supabase.table("bot_config").upsert({
+            "chat_id": chat_id,
+            "key": key,
+            "value": value,
+            "updated_at": utc_iso(),
+        }, on_conflict="chat_id,key").execute()
+        return True
+    except Exception as e:
+        logging.error(f"No pude guardar estado interno {key}: {e}")
+        return False
+
+
+def get_internal_state(chat_id, key):
+    try:
+        res = (
+            supabase
+            .table("bot_config")
+            .select("value")
+            .eq("chat_id", chat_id)
+            .eq("key", key)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0]["value"] if res.data else ""
+    except Exception as e:
+        logging.error(f"No pude leer estado interno {key}: {e}")
+        return ""
+
+
+def clear_internal_state(chat_id, key):
+    try:
+        supabase.table("bot_config").delete().eq("chat_id", chat_id).eq("key", key).execute()
+    except Exception as e:
+        logging.warning(f"No pude limpiar estado interno {key}: {e}")
+
+
+def save_pending_action(chat_id, action):
+    return set_internal_state(chat_id, "pending_action", json.dumps(action, ensure_ascii=False))
+
+
+def get_pending_action(chat_id):
+    raw = get_internal_state(chat_id, "pending_action")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def clear_pending_action(chat_id):
+    clear_internal_state(chat_id, "pending_action")
+
 
 
 
@@ -1218,20 +1357,32 @@ def summarize_history_for_router(history):
 
 def classify_contextual_route(user_text, chat_id, history=None, active_context=""):
     """
-    Router inteligente basado en LLM.
-    Evita depender de palabras sueltas y decide usando conversación + contexto activo.
+    Router inteligente basado en OpenAI.
+    Devuelve un dict con intent, confidence, needs_confirmation, target y reason.
     """
+    fallback = {
+        "intent": "NORMAL_CHAT",
+        "confidence": 0.4,
+        "needs_confirmation": False,
+        "target": "none",
+        "reason": "fallback",
+    }
+
     try:
         active_project = get_active_project(chat_id)
-        project_context = ""
+        active_task = get_latest_active_task(chat_id)
 
-        if active_project:
-            project_context = (
-                f"Proyecto activo: #{active_project.get('id')} - {active_project.get('title')}\n"
-                "Existe un proyecto activo, pero NO asumas que todo mensaje se refiere a él."
-            )
-        else:
-            project_context = "No hay proyecto activo confirmado."
+        project_context = (
+            f"Proyecto activo: #{active_project.get('id')} - {active_project.get('title')}"
+            if active_project else
+            "No hay proyecto activo confirmado."
+        )
+
+        task_context = (
+            f"Tarea activa: #{active_task.get('id')} - {active_task.get('title')} | {active_task.get('schedule_type')} | {active_task.get('time_of_day') or active_task.get('due_at')}"
+            if active_task else
+            "No hay tarea activa confirmada."
+        )
 
         router_input = f"""
 Mensaje actual de Iván:
@@ -1244,17 +1395,18 @@ Contexto activo:
 {active_context or "Sin contexto activo."}
 
 {project_context}
+{task_context}
 """
 
         response = openai_client.responses.create(
             model=OPENAI_MODEL,
             instructions=CONTEXT_ROUTER_PROMPT,
             input=router_input,
-            max_output_tokens=20,
+            max_output_tokens=250,
             temperature=0,
         )
 
-        route = response.output_text.strip().upper()
+        data = parse_json_output(response.output_text)
 
         valid = {
             "NORMAL_CHAT",
@@ -1266,15 +1418,51 @@ Contexto activo:
             "CONFIG_UPDATE",
             "CONFIG_VIEW",
             "TASK_CREATE",
+            "TASK_EDIT_ACTIVE",
             "TASK_LIST",
+            "TASK_DELETE",
             "TIME_REMAINING",
+            "AMBIGUOUS",
         }
 
-        return route if route in valid else "NORMAL_CHAT"
+        intent = str(data.get("intent", "NORMAL_CHAT")).upper()
+        if intent not in valid:
+            intent = "NORMAL_CHAT"
+
+        confidence = float(data.get("confidence", 0.5))
+        confidence = max(0.0, min(confidence, 1.0))
+
+        needs_confirmation = bool(data.get("needs_confirmation", False))
+
+        # Reglas de seguridad adicionales:
+        # Si hay baja confianza en acciones que modifican datos, confirmar.
+        risky = {
+            "PROJECT_EDIT_ACTIVE",
+            "PROJECT_CREATE_NEW",
+            "PROJECT_PUBLISH_ACTIVE",
+            "TASK_CREATE",
+            "TASK_EDIT_ACTIVE",
+            "TASK_DELETE",
+            "CONFIG_UPDATE",
+        }
+
+        if intent in risky and confidence < 0.78:
+            needs_confirmation = True
+
+        if intent == "AMBIGUOUS":
+            needs_confirmation = True
+
+        return {
+            "intent": intent,
+            "confidence": confidence,
+            "needs_confirmation": needs_confirmation,
+            "target": data.get("target", "none"),
+            "reason": data.get("reason", ""),
+        }
 
     except Exception as e:
-        logging.error(f"Error router contextual: {e}")
-        return "NORMAL_CHAT"
+        logging.error(f"Error router contextual JSON: {e}")
+        return fallback
 
 
 # ---------------------------------------------------
@@ -1826,6 +2014,90 @@ def delete_task(chat_id, user_text):
         return False
 
 
+def edit_active_task(chat_id, user_text):
+    task = get_latest_active_task(chat_id)
+
+    if not task:
+        return None, "No encontré una tarea activa para editar."
+
+    try:
+        current = now_local().isoformat()
+        existing = json.dumps(task, ensure_ascii=False)
+
+        response = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=TASK_EDIT_EXTRACT_PROMPT,
+            input=f"Fecha y hora actual: {current}\nTarea existente:\n{existing}\n\nPedido de Iván:\n{user_text}",
+            max_output_tokens=400,
+            temperature=0,
+        )
+
+        changes = parse_json_output(response.output_text)
+    except Exception as e:
+        logging.error(f"Error extrayendo edición de tarea: {e}")
+        changes = {}
+
+    update_data = {}
+
+    if changes.get("title"):
+        update_data["title"] = trim_text(changes["title"], 150)
+
+    if changes.get("task_prompt"):
+        update_data["task_prompt"] = trim_text(changes["task_prompt"], 5000)
+    else:
+        # Si el extractor falló, al menos reemplazamos el objetivo manteniendo horario/frecuencia.
+        update_data["task_prompt"] = trim_text(user_text, 5000)
+
+    if changes.get("schedule_type") in {"daily", "once"}:
+        update_data["schedule_type"] = changes["schedule_type"]
+
+    if changes.get("time_of_day"):
+        update_data["time_of_day"] = changes["time_of_day"]
+
+    if changes.get("due_at"):
+        update_data["due_at"] = changes["due_at"]
+
+    if changes.get("timezone"):
+        update_data["timezone"] = changes["timezone"]
+    else:
+        update_data["timezone"] = task.get("timezone") or LOCAL_TZ_NAME
+
+    try:
+        res = (
+            supabase
+            .table("scheduled_tasks")
+            .update(update_data)
+            .eq("chat_id", chat_id)
+            .eq("id", task["id"])
+            .execute()
+        )
+
+        updated = res.data[0] if res.data else {**task, **update_data}
+
+        return updated, None
+    except Exception as e:
+        logging.error(f"Error actualizando tarea #{task.get('id')}: {e}")
+        return None, "No pude actualizar la tarea. Revisá Supabase/logs."
+
+
+def format_task_confirmation(task):
+    if not task:
+        return "Tarea actualizada."
+
+    if task.get("schedule_type") == "daily":
+        when = f"todos los días a las {task.get('time_of_day') or '09:00'} hs"
+    else:
+        due_local = parse_datetime_to_local(task.get("due_at"))
+        when = due_local.strftime("%d/%m/%Y %H:%M hs") if due_local else "sin horario"
+
+    return (
+        f"Listo Iván. Actualicé la tarea #{task.get('id')}.\n\n"
+        f"{task.get('title')}\n"
+        f"Frecuencia: {when} ({task.get('timezone') or LOCAL_TZ_NAME}).\n\n"
+        f"Nuevo objetivo:\n{trim_text(task.get('task_prompt'), 900)}"
+    )
+
+
 def generate_task_report(task_prompt, config=None):
     web_context = get_web_context(task_prompt, config)
     runtime_prompt = build_runtime_system_prompt(config or DEFAULT_BOT_CONFIG)
@@ -2102,41 +2374,100 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     stop_typing = start_typing_loop(chat_id)
 
-    config = get_bot_config(chat_id)
-
-    if is_task_capability_question(user_text):
-        answer = (
-            "Sí, Iván. Puedo hacerlo.\n\n"
-            "Puedo guardar tareas programadas y enviarte reportes automáticamente por Telegram.\n\n"
-            "Ejemplo:\n"
-            "Todos los días a las 9 mandame un reporte de ciberseguridad."
-        )
-
-        stop_typing()
-        await update.message.reply_text(answer)
-        return
-
-    intent = classify_intent(user_text)
-    logging.info(f"Intent detectado: {intent}")
-
-    user_embedding = get_openai_embedding(user_text)
-    save_memory(chat_id, "user", user_text, user_embedding)
-
-    semantic_memories = get_semantic_memories(chat_id, user_embedding)
-    history = get_recent_history(chat_id)
-    web_context = get_web_context(user_text, config)
-    active_context = build_active_context(chat_id)
-    contextual_route = classify_contextual_route(user_text, chat_id, history, active_context)
-    logging.info(f"Contextual route detectado: {contextual_route}")
-
     project_saved = None
     draft_saved = None
     task_saved = None
     config_saved = None
+    route = {"intent": "NORMAL_CHAT", "confidence": 0, "needs_confirmation": False, "target": "none"}
 
     try:
-        if contextual_route == "CLOSING_CHAT":
-            answer = "Dale Iván, descansá. Mañana seguimos desde donde dejamos."
+        config = get_bot_config(chat_id)
+
+        # Confirmaciones pendientes: el bot pregunta antes de tocar algo si no está seguro.
+        pending = get_pending_action(chat_id)
+
+        if pending and is_no_confirmation(user_text):
+            clear_pending_action(chat_id)
+            answer = "Perfecto Iván, no toco nada. Seguimos como está."
+            answer = enhance_with_proactivity(chat_id, answer, user_text, config)
+            save_memory(chat_id, "user", user_text, get_openai_embedding(user_text))
+            save_memory(chat_id, "assistant", answer, get_openai_embedding(answer))
+            stop_typing()
+            await update.message.reply_text(answer)
+            return
+
+        if pending and is_yes_confirmation(user_text):
+            clear_pending_action(chat_id)
+            user_text_to_execute = pending.get("user_text", "")
+            forced_intent = pending.get("intent", "NORMAL_CHAT")
+            route = {
+                "intent": forced_intent,
+                "confidence": 1.0,
+                "needs_confirmation": False,
+                "target": pending.get("target", "none"),
+                "reason": "confirmado por Iván",
+            }
+            user_text = user_text_to_execute or user_text
+
+        if is_task_capability_question(user_text):
+            answer = (
+                "Sí, Iván. Puedo hacerlo.\n\n"
+                "Puedo guardar tareas programadas y enviarte reportes automáticamente por Telegram.\n\n"
+                "Ejemplo:\n"
+                "Todos los días a las 9 mandame un reporte de ciberseguridad."
+            )
+            answer = enhance_with_proactivity(chat_id, answer, user_text, config)
+            save_memory(chat_id, "user", user_text, get_openai_embedding(user_text))
+            save_memory(chat_id, "assistant", answer, get_openai_embedding(answer))
+            stop_typing()
+            await update.message.reply_text(answer)
+            return
+
+        user_embedding = get_openai_embedding(user_text)
+        save_memory(chat_id, "user", user_text, user_embedding)
+
+        semantic_memories = get_semantic_memories(chat_id, user_embedding)
+        history = get_recent_history(chat_id)
+        web_context = get_web_context(user_text, config)
+        active_context = build_active_context(chat_id)
+
+        if route["confidence"] != 1.0:
+            route = classify_contextual_route(user_text, chat_id, history, active_context)
+
+        contextual_route = route.get("intent", "NORMAL_CHAT")
+        logging.info(f"Router prodigio: {route}")
+
+        # Si el router no está seguro, pregunta antes de crear/editar/configurar.
+        if route.get("needs_confirmation"):
+            save_pending_action(chat_id, {
+                "intent": contextual_route,
+                "user_text": user_text,
+                "target": route.get("target", "none"),
+                "reason": route.get("reason", ""),
+                "created_at": utc_iso(),
+            })
+
+            if contextual_route == "TASK_EDIT_ACTIVE":
+                question = "Entendí que querés editar la tarea activa existente, no crear una nueva. ¿Confirmo?"
+            elif contextual_route == "TASK_CREATE":
+                question = "Entendí que querés crear una tarea nueva. ¿Confirmo?"
+            elif contextual_route == "PROJECT_EDIT_ACTIVE":
+                question = "Entendí que querés modificar el proyecto activo. ¿Confirmo?"
+            elif contextual_route == "PROJECT_CREATE_NEW":
+                question = "Entendí que querés crear un proyecto nuevo. ¿Confirmo?"
+            elif contextual_route == "CONFIG_UPDATE":
+                question = "Entendí que querés cambiar mi configuración. ¿Confirmo?"
+            else:
+                question = "Quiero confirmar antes de tocar algo: ¿querés que ejecute esta acción?"
+
+            answer = (
+                f"{question}\n\n"
+                f"Motivo: {route.get('reason') or 'interpretación contextual'}\n\n"
+                "Respondé: sí / no"
+            )
+
+        elif contextual_route == "CLOSING_CHAT":
+            answer = "Dale Iván, dejamos todo como está. Cuando quieras seguimos desde este punto."
 
         elif contextual_route == "PROJECT_SHOW_ACTIVE":
             active_project = get_active_project(chat_id)
@@ -2275,6 +2606,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 answer = "No pude guardar la tarea. Revisá Supabase/logs."
 
+        elif contextual_route == "TASK_EDIT_ACTIVE":
+            updated_task, error = edit_active_task(chat_id, user_text)
+            answer = error if error else format_task_confirmation(updated_task)
+
         elif contextual_route == "TASK_LIST":
             tasks = list_tasks(chat_id)
             if not tasks:
@@ -2290,6 +2625,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         when = due_local.strftime("%d/%m/%Y %H:%M hs") if due_local else "sin horario"
                     lines.append(f"#{t['id']} - {t['title']} | {when} | {status}")
                 answer = "\n".join(lines)
+
+        elif contextual_route == "TASK_DELETE":
+            ok = delete_task(chat_id, user_text)
+            answer = "Listo Iván. Tarea desactivada." if ok else "Decime el número de tarea. Ejemplo: borrar tarea 2"
 
         elif contextual_route == "TIME_REMAINING":
             task = get_latest_active_task(chat_id)
@@ -2307,289 +2646,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     answer = calculate_time_remaining(task.get("due_at"))
 
-        elif intent == "CONFIG_VIEW":
-            answer = format_config(config)
-
-        elif intent == "CONFIG_UPDATE":
-            # Primero intento parser directo
-            direct_changes = detect_direct_config_change(user_text)
-
-            if direct_changes:
-                config_saved = save_bot_config(chat_id, direct_changes)
-
-                if config_saved:
-                    new_config = get_bot_config(chat_id)
-                    answer = (
-                        "Listo Iván. Configuración actualizada.\n\n"
-                        + "\n".join([f"- {k}: {v}" for k, v in config_saved.items()])
-                        + "\n\n"
-                        + format_config(new_config)
-                    )
-                else:
-                    answer = "Detecté el cambio pero no pude guardarlo."
-            else:
-                changes = extract_config_changes(user_text)
-                config_saved = save_bot_config(chat_id, changes)
-
-                if config_saved:
-                    new_config = get_bot_config(chat_id)
-                    answer = (
-                        "Listo Iván. Actualicé mi configuración.\n\n"
-                        + "\n".join([f"- {k}: {v}" for k, v in config_saved.items()])
-                        + "\n\n"
-                        + format_config(new_config)
-                    )
-                else:
-                    answer = (
-                        "Entendí que querés cambiar mi configuración, pero no detecté un cambio válido.\n\n"
-                        "Probá por ejemplo:\n"
-                        "- cambiá el modelo a gpt-4o-mini\n"
-                        "- activá modo gerente\n"
-                        "- respondé más corto\n"
-                        "- cambiá max_output_tokens a 1200\n"
-                        "- probar config"
-                    )
-
-        elif intent == "TIME_REMAINING":
-            task = get_latest_active_task(chat_id)
-
-            if not task:
-                answer = "No tenés tareas programadas."
-            else:
-                if task.get("schedule_type") == "daily":
-                    time_of_day = task.get("time_of_day") or "09:00"
-                    hour, minute = map(int, time_of_day.split(":")[:2])
-                    now = now_local()
-                    due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-                    if due <= now:
-                        due = due + timedelta(days=1)
-
-                    answer = calculate_time_remaining(due.isoformat())
-                else:
-                    due_at = task.get("due_at")
-                    answer = calculate_time_remaining(due_at)
-
-        elif intent == "TASK_CREATE":
-            task_data = parse_task(user_text)
-            task_saved = create_scheduled_task(chat_id, task_data)
-
-            if task_saved:
-                if task_saved["schedule_type"] == "daily":
-                    answer = (
-                        f"Listo Iván. Tarea programada #{task_saved['id']}.\n\n"
-                        f"{task_saved['title']}\n"
-                        f"Frecuencia: todos los días a las {task_saved.get('time_of_day') or '09:00'} hs "
-                        f"({LOCAL_TZ_NAME})."
-                    )
-                else:
-                    due_local = parse_datetime_to_local(task_saved.get("due_at"))
-                    due_txt = due_local.strftime("%d/%m/%Y %H:%M") if due_local else task_saved.get("due_at")
-
-                    answer = (
-                        f"Listo Iván. Tarea programada #{task_saved['id']}.\n\n"
-                        f"{task_saved['title']}\n"
-                        f"Fecha: {due_txt} hs ({LOCAL_TZ_NAME})."
-                    )
-            else:
-                answer = "No pude guardar la tarea. Revisá Supabase/logs."
-
-        elif intent == "TASK_LIST":
-            tasks = list_tasks(chat_id)
-
-            if not tasks:
-                answer = "No tenés tareas programadas."
-            else:
-                lines = ["Tus tareas programadas:\n"]
-
-                for t in tasks:
-                    status = "activa" if t.get("is_active") else "inactiva"
-
-                    if t.get("schedule_type") == "daily":
-                        when = f"todos los días a las {t.get('time_of_day') or '09:00'} hs"
-                    else:
-                        due_local = parse_datetime_to_local(t.get("due_at"))
-                        when = due_local.strftime("%d/%m/%Y %H:%M hs") if due_local else "sin horario"
-
-                    lines.append(
-                        f"#{t['id']} - {t['title']} | {when} | {status}"
-                    )
-
-                answer = "\n".join(lines)
-
-        elif intent == "TASK_DELETE":
-            ok = delete_task(chat_id, user_text)
-
-            answer = (
-                "Listo Iván. Tarea desactivada."
-                if ok
-                else "Decime el número de tarea. Ejemplo: borrar tarea 2"
-            )
-
-        elif intent == "PROJECT_DRAFT_CREATE":
-            html = generate_html_from_request(user_text, semantic_memories, config)
-
-            draft_saved = create_draft(
-                chat_id,
-                trim_text(user_text, 100),
-                html,
-                user_text,
-            )
-
-            if draft_saved:
-                if config.get("auto_publish_projects") == "true":
-                    project_saved = publish_draft(chat_id, draft_saved)
-                    if project_saved:
-                        answer = (
-                            f"Listo Iván. Te armé y publiqué el proyecto como #{project_saved['id']}.\n\n"
-                            f"Ver online:\n{get_project_url(project_saved['id'])}"
-                            f"{format_project_files_urls(project_saved['id'])}"
-                        )
-                    else:
-                        answer = "Generé el borrador, pero no pude publicarlo."
-                else:
-                    answer = (
-                        "Listo Iván. Te armé un primer borrador del proyecto.\n\n"
-                        "Todavía no lo publiqué como URL final.\n\n"
-                        "Podés decirme:\n"
-                        "- publicalo\n"
-                        "- cambiar colores\n"
-                        "- agregar sección de contacto\n"
-                        "- ver borrador"
-                    )
-            else:
-                answer = "Generé el borrador, pero no pude guardarlo."
-
-        elif intent == "PROJECT_DRAFT_EDIT":
-            draft = get_latest_draft(chat_id)
-
-            if draft:
-                new_html = edit_html(draft["html_content"], user_text, config)
-
-                draft_saved = update_draft(
-                    chat_id,
-                    draft["id"],
-                    new_html,
-                    user_text,
-                )
-
-                answer = (
-                    "Listo Iván. Apliqué los cambios al borrador. "
-                    "Cuando quieras verlo online, decime: publicalo."
-                )
-            else:
-                active_project = get_active_project(chat_id)
-
-                if active_project:
-                    updated_project = update_published_project(chat_id, active_project, user_text, config)
-
-                    if updated_project:
-                        project_id = updated_project["id"]
-                        answer = (
-                            f"Listo Iván. Actualicé el proyecto activo #{project_id}.\n\n"
-                            f"Ver online:\n{get_project_url(project_id)}"
-                            f"{format_project_files_urls(project_id)}"
-                        )
-                    else:
-                        answer = "Encontré el proyecto activo, pero no pude actualizarlo. Revisá /errors o logs."
-                else:
-                    answer = "No tengo un borrador ni proyecto activo para editar. Primero pedime que cree una página o proyecto."
-
-        elif intent == "PROJECT_PUBLISH":
-            draft = get_latest_draft(chat_id)
-
-            if not draft:
-                answer = "No tengo un borrador activo para publicar."
-            else:
-                project_saved = publish_draft(chat_id, draft)
-
-                if project_saved:
-                    url = get_project_url(project_saved["id"])
-
-                    answer = (
-                        f"Listo Iván. Proyecto publicado como #{project_saved['id']}.\n\n"
-                        f"Ver online:\n{url}"
-                        f"{format_project_files_urls(project_saved['id'])}"
-                    )
-                else:
-                    answer = "No pude publicar el proyecto."
-
-        elif intent == "PROJECT_VIEW_DRAFT":
-            draft = get_latest_draft(chat_id)
-
-            if draft:
-                answer = (
-                    f"Borrador activo #{draft['id']}\n"
-                    f"Título: {draft['title']}\n\n"
-                    "Decime 'publicalo' para crear la URL."
-                )
-            else:
-                answer = "No tengo un borrador activo."
-
-        elif intent == "PROJECT_LIST":
-            projects = list_projects(chat_id)
-
-            if not projects:
-                answer = "Todavía no tenés proyectos publicados."
-            else:
-                lines = ["Tus últimos proyectos publicados:\n"]
-
-                for p in projects:
-                    lines.append(
-                        f"#{p['id']} - {p['title']}\n{get_project_url(p['id'])}"
-                    )
-
-                answer = "\n\n".join(lines)
-
-        elif intent == "PROJECT_VIEW_PUBLISHED":
-            match = re.search(r"(\d+)", user_text)
-
-            if not match:
-                answer = "Decime el número del proyecto. Ejemplo: ver proyecto 3"
-            else:
-                project_id = int(match.group(1))
-                project = get_project(chat_id, project_id)
-
-                if project:
-                    answer = f"Proyecto #{project_id}:\n{get_project_url(project_id)}"
-                else:
-                    answer = "No encontré ese proyecto."
-
-        elif contextual_route == "PROJECT_EDIT_ACTIVE" and is_project_followup_edit(user_text) and not is_conversation_closing(user_text) and get_active_project(chat_id):
-            active_project = get_active_project(chat_id)
-            lower_text = user_text.lower().strip()
-
-            if any(x in lower_text for x in ["mostrame", "mostrar", "cómo va", "como va", "ver", "pasame la url"]):
-                project_id = active_project["id"]
-                answer = (
-                    f"Estamos trabajando sobre el proyecto activo #{project_id}.\n\n"
-                    f"Ver online:\n{get_project_url(project_id)}"
-                    f"{format_project_files_urls(project_id)}"
-                )
-            else:
-                updated_project = update_published_project(chat_id, active_project, user_text, config)
-
-                if updated_project:
-                    project_id = updated_project["id"]
-                    answer = (
-                        f"Listo Iván. Entendí que querías seguir trabajando sobre el proyecto activo #{project_id}.\n\n"
-                        f"Apliqué los cambios solicitados.\n\n"
-                        f"Ver online:\n{get_project_url(project_id)}"
-                        f"{format_project_files_urls(project_id)}"
-                    )
-                else:
-                    answer = "Encontré el proyecto activo, pero no pude actualizarlo. Revisá /errors o logs."
-
-        elif is_short_contextual_reply(user_text) and get_active_project(chat_id):
-            active_project = get_active_project(chat_id)
-            project_id = active_project["id"]
-            answer = (
-                f"Sigo con el proyecto activo #{project_id}.\n\n"
-                f"Ver online:\n{get_project_url(project_id)}"
-                f"{format_project_files_urls(project_id)}\n\n"
-                "Decime el cambio puntual y lo aplico sobre este proyecto."
-            )
-
         else:
             input_messages = build_chat_input(
                 user_text,
@@ -2598,7 +2654,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 web_context,
                 active_context,
             )
-
             answer = ask_openai_chat(input_messages, config)
 
     except Exception as e:
@@ -2606,25 +2661,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_event(chat_id, "error", f"Error procesando mensaje: {e}")
         answer = "Che Iván, se me tildó la IA. Revisá logs de Render y probá de nuevo."
 
-    answer = enhance_with_proactivity(chat_id, answer, user_text, get_bot_config(chat_id))
+    try:
+        answer = enhance_with_proactivity(chat_id, answer, user_text, get_bot_config(chat_id))
+        assistant_embedding = get_openai_embedding(answer)
+        save_memory(chat_id, "assistant", answer, assistant_embedding)
 
-    assistant_embedding = get_openai_embedding(answer)
-    save_memory(chat_id, "assistant", answer, assistant_embedding)
+        send_to_webhook({
+            "type": "bot_output",
+            "intent": route.get("intent", "NORMAL_CHAT"),
+            "route": route,
+            "chat_id": chat_id,
+            "user_message": user_text,
+            "bot_response": answer,
+            "draft_saved": draft_saved,
+            "project_saved": project_saved,
+            "task_saved": task_saved,
+            "config_saved": config_saved,
+            "model": get_model_from_config(get_bot_config(chat_id)),
+        })
+    finally:
+        stop_typing()
 
-    send_to_webhook({
-        "type": "bot_output",
-        "intent": intent,
-        "chat_id": chat_id,
-        "user_message": user_text,
-        "bot_response": answer,
-        "draft_saved": draft_saved,
-        "project_saved": project_saved,
-        "task_saved": task_saved,
-        "config_saved": config_saved,
-        "model": get_model_from_config(config),
-    })
-
-    stop_typing()
     await update.message.reply_text(answer)
 
 
