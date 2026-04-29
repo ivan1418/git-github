@@ -45,9 +45,6 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
 AUTO_SUGGESTIONS_ENABLED = os.getenv("AUTO_SUGGESTIONS_ENABLED", "true").lower() == "true"
 AUTO_HEALTH_ALERTS_ENABLED = os.getenv("AUTO_HEALTH_ALERTS_ENABLED", "true").lower() == "true"
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
-AUTO_SUGGESTIONS_ENABLED = os.getenv("AUTO_SUGGESTIONS_ENABLED", "true").lower() == "true"
-AUTO_HEALTH_ALERTS_ENABLED = os.getenv("AUTO_HEALTH_ALERTS_ENABLED", "true").lower() == "true"
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -159,28 +156,6 @@ class WebHandler(BaseHTTPRequestHandler):
             self.wfile.write(content.encode("utf-8"))
             return
 
-        file_match = re.match(r"^/projects/(\d+)/files/([^/]+)$", path)
-        if file_match:
-            project_id = int(file_match.group(1))
-            filename = file_match.group(2)
-
-            file_row = get_project_file(project_id, filename)
-
-            if not file_row:
-                self.send_response(404)
-                self.send_header("Content-type", "text/plain; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(b"Archivo no encontrado.")
-                return
-
-            content_type = file_row.get("content_type") or "text/plain; charset=utf-8"
-            content = file_row.get("content") or ""
-
-            self.send_response(200)
-            self.send_header("Content-type", content_type)
-            self.end_headers()
-            self.wfile.write(content.encode("utf-8"))
-            return
 
         self.send_response(404)
         self.send_header("Content-type", "text/plain; charset=utf-8")
@@ -1438,6 +1413,7 @@ def publish_draft(chat_id, draft):
 
         if project:
             save_project_files(project["id"], draft["html_content"])
+            set_active_project_id(chat_id, project["id"])
 
             supabase.table("project_drafts").update({
                 "status": "published",
@@ -1938,16 +1914,39 @@ async def telegram_startup_cleanup(application):
 # ---------------------------------------------------
 # INDICADOR "ESCRIBIENDO..." PERSISTENTE
 # ---------------------------------------------------
-async def keep_typing(context: ContextTypes.DEFAULT_TYPE, chat_id: int, interval: int = 4):
-    """Mantiene visible el estado 'escribiendo...' mientras el bot procesa."""
-    try:
-        while True:
-            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-            await asyncio.sleep(interval)
-    except asyncio.CancelledError:
-        return
-    except Exception as e:
-        logging.warning(f"No pude mantener typing activo: {e}")
+def start_typing_loop(chat_id: int, interval: int = 4):
+    """
+    Mantiene visible 'escribiendo...' usando un thread separado.
+
+    Importante:
+    El código usa llamadas SINCRÓNICAS a OpenAI/Supabase.
+    Si usamos asyncio.create_task(), el event loop queda bloqueado durante esas llamadas
+    y Telegram no recibe nuevos chat_action. Por eso lo hacemos con threading + requests.
+    """
+    stop_event = threading.Event()
+
+    def _worker():
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
+
+        while not stop_event.is_set():
+            try:
+                requests.post(
+                    url,
+                    json={"chat_id": chat_id, "action": "typing"},
+                    timeout=8,
+                )
+            except Exception as e:
+                logging.warning(f"No pude enviar typing persistente: {e}")
+
+            stop_event.wait(interval)
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+    def stop():
+        stop_event.set()
+
+    return stop
 
 # ---------------------------------------------------
 # BOT - MENSAJES NATURALES
@@ -1956,7 +1955,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text or ""
 
-    typing_task = asyncio.create_task(keep_typing(context, chat_id))
+    stop_typing = start_typing_loop(chat_id)
 
     config = get_bot_config(chat_id)
 
@@ -1968,7 +1967,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Todos los días a las 9 mandame un reporte de ciberseguridad."
         )
 
-        typing_task.cancel()
+        stop_typing()
         await update.message.reply_text(answer)
         return
 
@@ -2126,7 +2125,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"Listo Iván. Te armé y publiqué el proyecto como #{project_saved['id']}.\n\n"
                             f"Ver online:\n{get_project_url(project_saved['id'])}"
                             f"{format_project_files_urls(project_saved['id'])}"
-                            f"{format_project_files_urls(project_saved['id'])}"
                         )
                     else:
                         answer = "Generé el borrador, pero no pude publicarlo."
@@ -2192,7 +2190,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     answer = (
                         f"Listo Iván. Proyecto publicado como #{project_saved['id']}.\n\n"
                         f"Ver online:\n{url}"
-                        f"{format_project_files_urls(project_saved['id'])}"
                         f"{format_project_files_urls(project_saved['id'])}"
                     )
                 else:
@@ -2308,7 +2305,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "model": get_model_from_config(config),
     })
 
-    typing_task.cancel()
+    stop_typing()
     await update.message.reply_text(answer)
 
 
