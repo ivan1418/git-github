@@ -1,4 +1,5 @@
 import os
+import asyncio
 import re
 import json
 import logging
@@ -1933,6 +1934,21 @@ async def telegram_startup_cleanup(application):
         logging.error(f"Error limpiando Telegram al iniciar: {e}")
 
 
+
+# ---------------------------------------------------
+# INDICADOR "ESCRIBIENDO..." PERSISTENTE
+# ---------------------------------------------------
+async def keep_typing(context: ContextTypes.DEFAULT_TYPE, chat_id: int, interval: int = 4):
+    """Mantiene visible el estado 'escribiendo...' mientras el bot procesa."""
+    try:
+        while True:
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        logging.warning(f"No pude mantener typing activo: {e}")
+
 # ---------------------------------------------------
 # BOT - MENSAJES NATURALES
 # ---------------------------------------------------
@@ -1940,7 +1956,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text or ""
 
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    typing_task = asyncio.create_task(keep_typing(context, chat_id))
 
     config = get_bot_config(chat_id)
 
@@ -1952,6 +1968,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Todos los días a las 9 mandame un reporte de ciberseguridad."
         )
 
+        typing_task.cancel()
         await update.message.reply_text(answer)
         return
 
@@ -2291,6 +2308,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "model": get_model_from_config(config),
     })
 
+    typing_task.cancel()
     await update.message.reply_text(answer)
 
 
