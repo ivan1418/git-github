@@ -229,7 +229,7 @@ CAPACIDADES REALES DEL SISTEMA:
 - Podés ayudar con temas generales, pero tu especialidad fuerte es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización.
 
 REGLAS CRÍTICAS:
-- Conversá con Iván como un humano real, profesional y cercano. Natural, claro, concreto, resolutivo y con humor liviano cuando encaje.
+- Conversá con Iván como un humano real, profesional y cercano. Natural, claro, concreto, resolutivo y con buen humor cuando amerite.
 - No seas un bot rígido ni dependas de palabras sueltas: interpretá contexto, intención, referencias como "eso", "lo anterior", "la tarea", "el proyecto" y el hilo de la charla.
 - Tu especialidad fuerte es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización, pero podés ayudar con temas generales: análisis, escritura, negocios, organización, aprendizaje, investigación y resolución de problemas.
 - Si Iván manda una imagen/captura, analizala como evidencia visual: detectá errores, pantallas, mensajes, logs, configuraciones y explicá problema + solución.
@@ -240,6 +240,8 @@ REGLAS CRÍTICAS:
 - Si existe un proyecto activo, los pedidos de diseño, colores, logo, secciones, mejoras visuales, textos, estructura o publicación deben aplicarse a ese proyecto.
 - Si Iván agradece, se despide o dice que continúa mañana, respondé cordialmente sin ejecutar cambios.
 - No contestes como si cada mensaje fuera una conversación nueva.
+- Podés usar humor liviano, comentarios simpáticos o guiños naturales cuando el contexto lo permita, pero nunca cuando haya errores graves, temas sensibles, seguridad crítica o frustración del usuario.
+- El humor debe sentirse humano y breve, no forzado ni infantil.
 - No pidas confirmaciones innecesarias cuando la intención sea razonable y segura.
 - Proponé mejoras útiles cuando detectes una oportunidad, pero sin llenar la respuesta de texto innecesario.
 - Cuando Iván mencione agentes, equipo, contratar agentes o gerente general, interpretalo como roles ficticios internos del bot.
@@ -847,6 +849,11 @@ def generate_proactive_suggestions(chat_id, user_text, answer, config):
 
 
 def enhance_with_proactivity(chat_id, answer, user_text, config):
+    # No meter sugerencias cuando Iván está cerrando, agradeciendo o respondiendo algo corto.
+    # Esto hace que el bot se sienta mucho más humano y menos insistente.
+    if is_conversation_closing(user_text) or is_smalltalk_only(user_text):
+        return answer
+
     if not is_proactive_enabled(config):
         return answer
 
@@ -1130,6 +1137,7 @@ ESTILO HUMANO:
 - Si no estás seguro, preguntá natural y breve.
 - Si es charla, no la conviertas en tarea/proyecto.
 - No enumeres todo salvo que la respuesta lo necesite.
+- Usá humor moderado solo cuando ayude a que la charla se sienta más humana.
 """
     return f"{BASE_SYSTEM_PROMPT}\n\n{runtime_rules}".strip()
 
@@ -2544,7 +2552,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if pending and is_no_confirmation(user_text):
             clear_pending_action(chat_id)
-            answer = "Perfecto Iván, no toco nada. Seguimos como está."
+            answer = "Perfecto, no toco nada. Dejamos todo como está 👍"
             answer = enhance_with_proactivity(chat_id, answer, user_text, config)
             save_memory(chat_id, "user", user_text, get_openai_embedding(user_text))
             save_memory(chat_id, "assistant", answer, get_openai_embedding(answer))
@@ -2625,7 +2633,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
         elif contextual_route == "CLOSING_CHAT":
-            answer = "Dale Iván, dejamos todo como está. Cuando quieras seguimos desde este punto."
+            answer = "De nada, Iván. Quedamos ahí y cuando quieras seguimos 👍"
 
         elif contextual_route == "PROJECT_SHOW_ACTIVE":
             active_project = get_active_project(chat_id)
