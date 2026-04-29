@@ -41,6 +41,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 WEBHOOK_DEBUG_URL = os.getenv("WEBHOOK_DEBUG_URL")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
+AUTO_SUGGESTIONS_ENABLED = os.getenv("AUTO_SUGGESTIONS_ENABLED", "true").lower() == "true"
+AUTO_HEALTH_ALERTS_ENABLED = os.getenv("AUTO_HEALTH_ALERTS_ENABLED", "true").lower() == "true"
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -126,6 +129,29 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(html.encode("utf-8"))
+            return
+
+        file_match = re.match(r"^/projects/(\d+)/files/([^/]+)$", path)
+        if file_match:
+            project_id = int(file_match.group(1))
+            filename = file_match.group(2)
+
+            file_row = get_project_file(project_id, filename)
+
+            if not file_row:
+                self.send_response(404)
+                self.send_header("Content-type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Archivo no encontrado.")
+                return
+
+            content_type = file_row.get("content_type") or "text/plain; charset=utf-8"
+            content = file_row.get("content") or ""
+
+            self.send_response(200)
+            self.send_header("Content-type", content_type)
+            self.end_headers()
+            self.wfile.write(content.encode("utf-8"))
             return
 
         self.send_response(404)
@@ -1129,6 +1155,8 @@ def publish_draft(chat_id, draft):
         project = res.data[0] if res.data else None
 
         if project:
+            save_project_files(project["id"], draft["html_content"])
+
             supabase.table("project_drafts").update({
                 "status": "published",
                 "updated_at": utc_iso(),
@@ -1195,6 +1223,98 @@ def get_project_by_id(project_id):
     except Exception as e:
         logging.error(f"Error proyecto público: {e}")
         return None
+
+
+def split_html_into_files(html):
+    """Convierte un HTML completo en archivos lógicos: index.html, styles.css y script.js."""
+    if not html:
+        return {
+            "index.html": "<!DOCTYPE html><html><head><title>Proyecto</title></head><body></body></html>",
+            "styles.css": "",
+            "script.js": "",
+        }
+
+    css_blocks = re.findall(r"<style[^>]*>(.*?)</style>", html, flags=re.DOTALL | re.IGNORECASE)
+    js_blocks = re.findall(r"<script[^>]*>(.*?)</script>", html, flags=re.DOTALL | re.IGNORECASE)
+
+    css = "\n\n".join([c.strip() for c in css_blocks if c.strip()])
+    js = "\n\n".join([j.strip() for j in js_blocks if j.strip()])
+
+    index = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    index = re.sub(r"<script[^>]*>.*?</script>", "", index, flags=re.DOTALL | re.IGNORECASE)
+
+    if css and "</head>" in index.lower():
+        index = re.sub(r"</head>", '<link rel="stylesheet" href="./files/styles.css">\n</head>', index, flags=re.IGNORECASE)
+
+    if js and "</body>" in index.lower():
+        index = re.sub(r"</body>", '<script src="./files/script.js"></script>\n</body>', index, flags=re.IGNORECASE)
+
+    return {
+        "index.html": index.strip(),
+        "styles.css": css,
+        "script.js": js,
+    }
+
+
+def save_project_files(project_id, html):
+    """Guarda archivos del proyecto en Supabase. Si la tabla no existe, no rompe el flujo principal."""
+    files = split_html_into_files(html)
+    saved = []
+
+    for filename, content in files.items():
+        if filename == "styles.css":
+            content_type = "text/css; charset=utf-8"
+        elif filename == "script.js":
+            content_type = "application/javascript; charset=utf-8"
+        else:
+            content_type = "text/html; charset=utf-8"
+
+        try:
+            supabase.table("project_files").upsert({
+                "project_id": project_id,
+                "filename": filename,
+                "content": content,
+                "content_type": content_type,
+                "updated_at": utc_iso(),
+            }, on_conflict="project_id,filename").execute()
+
+            saved.append(filename)
+        except Exception as e:
+            logging.warning(f"No pude guardar archivo {filename} del proyecto {project_id}: {e}")
+
+    return saved
+
+
+def get_project_file(project_id, filename):
+    try:
+        res = (
+            supabase
+            .table("project_files")
+            .select("project_id, filename, content, content_type, updated_at")
+            .eq("project_id", project_id)
+            .eq("filename", filename)
+            .limit(1)
+            .execute()
+        )
+
+        return res.data[0] if res.data else None
+
+    except Exception as e:
+        logging.warning(f"No pude leer archivo {filename} del proyecto {project_id}: {e}")
+        return None
+
+
+def format_project_files_urls(project_id):
+    base = get_project_url(project_id)
+    if not base or base.startswith("/"):
+        return ""
+
+    return (
+        "\n\nArchivos del proyecto:\n"
+        f"- index.html: {base}/files/index.html\n"
+        f"- styles.css: {base}/files/styles.css\n"
+        f"- script.js: {base}/files/script.js"
+    )
 
 
 # ---------------------------------------------------
@@ -1700,6 +1820,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         answer = (
                             f"Listo Iván. Te armé y publiqué el proyecto como #{project_saved['id']}.\n\n"
                             f"Ver online:\n{get_project_url(project_saved['id'])}"
+                            f"{format_project_files_urls(project_saved['id'])}"
                         )
                     else:
                         answer = "Generé el borrador, pero no pude publicarlo."
@@ -1750,6 +1871,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     answer = (
                         f"Listo Iván. Proyecto publicado como #{project_saved['id']}.\n\n"
                         f"Ver online:\n{url}"
+                        f"{format_project_files_urls(project_saved['id'])}"
                     )
                 else:
                     answer = "No pude publicar el proyecto."
@@ -1845,6 +1967,13 @@ def main_menu_keyboard():
 
 def back_menu_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Volver al panel", callback_data="panel_home")]])
+
+
+def diagnostic_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Aplicar sugerencias seguras", callback_data="panel_apply_suggestions")],
+        [InlineKeyboardButton("⬅️ Volver al panel", callback_data="panel_home")],
+    ])
 
 
 def panel_home_text():
@@ -2129,7 +2258,7 @@ def build_diagnostic_text(chat_id):
         "━━━━━━━━━━━━━━━━━━━━━━",
         "🛠 ACCIONES RÁPIDAS",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        "Copiá y enviá una de estas órdenes:",
+        "Podés tocar el botón ✅ Aplicar sugerencias seguras o copiar una orden:",
         "",
         "• cambiá max_output_tokens a 1200",
         "• activá modo gerente",
@@ -2194,7 +2323,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "panel_errors":
         await edit_panel(query, panel_errors_text(chat_id))
     elif data == "panel_diagnostico":
-        await edit_panel(query, build_diagnostic_text(chat_id))
+        await edit_panel(query, build_diagnostic_text(chat_id), diagnostic_keyboard())
+    elif data == "panel_apply_suggestions":
+        await edit_panel(query, apply_diagnostic_suggestions(chat_id), diagnostic_keyboard())
     else:
         await edit_panel(query, "No reconozco esa opción.", main_menu_keyboard())
 
@@ -2257,12 +2388,171 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_diagnostico(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    await update.message.reply_text(build_diagnostic_text(chat_id))
+    await update.message.reply_text(build_diagnostic_text(chat_id), reply_markup=diagnostic_keyboard())
 
 
 async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Reiniciando servicio en Render...")
     os._exit(0)
+
+
+
+# ---------------------------------------------------
+# AUTOMATIZACIÓN PROACTIVA / ALERTAS
+# ---------------------------------------------------
+def get_known_chat_ids(limit=50):
+    chat_ids = set()
+
+    if ADMIN_CHAT_ID:
+        try:
+            chat_ids.add(int(ADMIN_CHAT_ID))
+        except Exception:
+            pass
+
+    for table_name in ["bot_config", "scheduled_tasks", "bot_memory"]:
+        try:
+            res = (
+                supabase
+                .table(table_name)
+                .select("chat_id")
+                .limit(limit)
+                .execute()
+            )
+
+            for row in res.data or []:
+                cid = row.get("chat_id")
+                if cid and int(cid) != 0:
+                    chat_ids.add(int(cid))
+        except Exception as e:
+            logging.warning(f"No pude leer chat_ids desde {table_name}: {e}")
+
+    return list(chat_ids)
+
+
+def already_ran_today(chat_id, event_type):
+    today = now_local().date().isoformat()
+    try:
+        events = get_recent_events(chat_id, limit=20)
+        for event in events:
+            if event.get("event_type") != event_type:
+                continue
+            created = event.get("created_at", "")
+            if created.startswith(today):
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def run_auto_suggestions():
+    if not AUTO_SUGGESTIONS_ENABLED:
+        return
+
+    try:
+        for chat_id in get_known_chat_ids():
+            if already_ran_today(chat_id, "auto_suggestion"):
+                continue
+
+            diagnostic = build_diagnostic_text(chat_id)
+            message = (
+                "🧠 Sugerencia automática diaria\n\n"
+                "Hice un diagnóstico rápido del bot y te dejo recomendaciones:\n\n"
+                f"{diagnostic}"
+            )
+
+            telegram_send_message(chat_id, message)
+            log_event(chat_id, "auto_suggestion", "Diagnóstico automático enviado.")
+    except Exception as e:
+        logging.error(f"Error en sugerencias automáticas: {e}")
+
+
+def run_auto_health_alerts():
+    if not AUTO_HEALTH_ALERTS_ENABLED:
+        return
+
+    try:
+        openai_ok = True
+        supabase_ok = True
+        errors = []
+
+        try:
+            supabase.table("scheduled_tasks").select("id").limit(1).execute()
+        except Exception as e:
+            supabase_ok = False
+            errors.append(f"Supabase: {e}")
+
+        try:
+            openai_client.responses.create(
+                model=OPENAI_MODEL,
+                instructions="Respondé solo OK.",
+                input="healthcheck",
+                max_output_tokens=20,
+                temperature=0,
+            )
+        except Exception as e:
+            openai_ok = False
+            errors.append(f"OpenAI: {e}")
+
+        if not errors:
+            return
+
+        for chat_id in get_known_chat_ids():
+            last_events = get_recent_events(chat_id, limit=10)
+            repeated = any(
+                event.get("event_type") == "health_alert"
+                and "últimos minutos" in (event.get("message") or "")
+                for event in last_events
+            )
+
+            if repeated:
+                continue
+
+            msg = (
+                "🚨 Alerta automática de Bozi-bot\n\n"
+                "Detecté un problema en servicios críticos:\n\n"
+                + "\n".join([f"- {e}" for e in errors])
+                + "\n\nRevisá Render Logs y ejecutá /health."
+            )
+
+            telegram_send_message(chat_id, msg)
+            log_event(chat_id, "health_alert", "Alerta health últimos minutos: " + " | ".join(errors))
+    except Exception as e:
+        logging.error(f"Error en health alerts: {e}")
+
+
+def apply_diagnostic_suggestions(chat_id):
+    """Aplica solo cambios seguros y reversibles en Supabase. No toca Render ni GitHub."""
+    config = get_bot_config(chat_id)
+
+    changes = {
+        "mode": "gerente_general",
+        "detail_level": "alto",
+        "technical_depth": "alto",
+        "agent_team": "enabled",
+        "project_behavior": "draft_first",
+        "auto_publish_projects": "false",
+    }
+
+    try:
+        current_tokens = int(config.get("max_output_tokens", MAX_OUTPUT_TOKENS))
+        if current_tokens < 1200:
+            changes["max_output_tokens"] = "1200"
+    except Exception:
+        changes["max_output_tokens"] = "1200"
+
+    saved = save_bot_config(chat_id, changes)
+    log_event(chat_id, "apply_suggestions", f"Sugerencias aplicadas: {saved}")
+
+    if not saved:
+        return "No pude aplicar cambios automáticos. Revisá /errors."
+
+    return (
+        "✅ Sugerencias seguras aplicadas\n\n"
+        + "\n".join([f"- {k}: {v}" for k, v in saved.items()])
+        + "\n\nNo modifiqué variables de Render ni creé tareas sin tu confirmación."
+    )
+
 
 
 # ---------------------------------------------------
@@ -2273,6 +2563,8 @@ if __name__ == "__main__":
 
     scheduler = BackgroundScheduler(timezone=LOCAL_TZ_NAME)
     scheduler.add_job(run_due_tasks, "cron", second=0)
+    scheduler.add_job(run_auto_suggestions, "cron", hour=9, minute=10)
+    scheduler.add_job(run_auto_health_alerts, "interval", minutes=10)
     scheduler.start()
 
     application = (
