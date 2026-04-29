@@ -49,9 +49,9 @@ AUTO_HEALTH_ALERTS_ENABLED = os.getenv("AUTO_HEALTH_ALERTS_ENABLED", "true").low
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
-MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "4"))
-MAX_MEMORY_RESULTS = int(os.getenv("MAX_MEMORY_RESULTS", "6"))
-MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1000"))
+MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "8"))
+MAX_MEMORY_RESULTS = int(os.getenv("MAX_MEMORY_RESULTS", "10"))
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1300"))
 
 USE_EMBEDDINGS = os.getenv("USE_EMBEDDINGS", "true").lower() == "true"
 USE_WEB_SEARCH = os.getenv("USE_WEB_SEARCH", "smart").lower()
@@ -229,7 +229,7 @@ CAPACIDADES REALES DEL SISTEMA:
 - Podés ayudar con temas generales, pero tu especialidad fuerte es IT, programación, ciberseguridad, infraestructura, redes, sysadmin, DevOps y automatización.
 
 REGLAS CRÍTICAS:
-- Conversá con Iván como un humano profesional: natural, claro, concreto, preciso y resolutivo.
+- Conversá con Iván como un humano profesional: natural, claro, concreto, preciso, resolutivo y cuando se pueda se divertido.
 - Mantené el hilo de conversación como un humano: distinguí charla normal, despedidas, agradecimientos, dudas, planificación y trabajo real.
 - No asumas que todo mensaje corto es una orden. Frases como "ok gracias", "mañana seguimos", "me voy a dormir", "después vemos", "lo vemos mañana" son cierre de conversación, no edición de proyecto.
 - Si venimos trabajando en un proyecto, seguí el contexto SOLO cuando Iván pida una acción concreta sobre el proyecto: mejorar, cambiar, agregar, quitar, publicar, mostrar, diseñar, ajustar, modificar o revisar.
