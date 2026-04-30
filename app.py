@@ -29,7 +29,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 # Modelo estable para evitar el 404
-OPENROUTER_MODEL_NAME = "mistralai/mistral-7b-instruct:free"
+OPENROUTER_MODEL_NAME = "mistralai/mistral-7b-instruct-v0.1"
 OPENAI_MODEL_NAME = "gpt-4o-mini"
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
