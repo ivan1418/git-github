@@ -1,22 +1,19 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 3.0 (FULL COMMANDS + MANUAL SELECT + KILL SWITCH)
+# Versión: 3.1 (VISION + HYBRID FIX + TYPING STATUS)
 # ===================================================
 
 import os
 import re
 import json
 import logging
-import threading
+import base64
 import asyncio 
-import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from urllib.parse import urlparse
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Telegram e IA
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 from openai import AsyncOpenAI
 from supabase import create_client
@@ -33,43 +30,21 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 LOCAL_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
-OPENAI_MODEL_TECNICO = "gpt-4o-mini"
-OPENROUTER_MODEL_CHAT = "google/gemma-4-31b-it:free"
+OPENAI_MODEL = "gpt-4o-mini"
+OPENROUTER_MODEL = "google/gemma-7b-it:free"
 
-# Clientes
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 openrouter_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------------------------------------------------
-# 🧹 KILL SWITCH
-# ---------------------------------------------------
-def kill_telegram_conflicts(token):
-    url = f"https://api.telegram.org/bot{token}/deleteWebhook?drop_pending_updates=True"
-    try:
-        requests.post(url, timeout=10)
-        logging.info("🧹 Conflictos de Telegram limpiados.")
-    except Exception as e:
-        logging.error(f"❌ Error en Kill Switch: {e}")
-
-# ---------------------------------------------------
-# 🏛️ FUNCIONES DE DATOS (Supabase)
+# 🏛️ HELPERS
 # ---------------------------------------------------
 async def get_config(chat_id):
     try:
         res = supabase.table("bot_config").select("*").eq("chat_id", chat_id).execute()
         return res.data[0] if res.data else {}
     except: return {}
-
-async def update_model_pref(chat_id, model_name):
-    try:
-        supabase.table("bot_config").upsert({
-            "chat_id": chat_id, 
-            "selected_model": model_name,
-            "updated_at": datetime.now(LOCAL_TZ).isoformat()
-        }).execute()
-    except Exception as e:
-        logging.error(f"Error guardando modelo: {e}")
 
 async def get_history(chat_id):
     try:
@@ -83,109 +58,101 @@ async def safe_save(chat_id, role, content):
     except: pass
 
 # ---------------------------------------------------
-# 🔥 COMANDOS (Handlers)
+# 👁️ VISIÓN: PROCESAMIENTO DE IMÁGENES
 # ---------------------------------------------------
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏛️ Bozi-bot Elite Online.\nUsa /models para elegir tu IA o /config para ver el estado.\nCEO: Iván.")
-
-async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    config = await get_config(chat_id)
-    
-    modelo = config.get("selected_model", "openai (default)")
-    modo = config.get("mode", "asistente")
-    
-    texto = (
-        f"⚙️ *Configuración de Bozi-bot*\n\n"
-        f"🧠 *Modelo Activo:* {modelo.upper()}\n"
-        f"🛠️ *Modo:* {modo}\n"
-        f"📅 *Actualizado:* {config.get('updated_at', 'N/A')}"
-    )
-    await update.message.reply_text(texto, parse_mode="Markdown")
+    # Indicamos que estamos analizando la imagen
+    await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
+    status = await update.message.reply_text("🧐 Analizando imagen...")
 
-async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🤖 OpenAI (gpt-4o-mini)", callback_data='set_mod_openai')],
-        [InlineKeyboardButton("☁️ OpenRouter (Gemma Gratis)", callback_data='set_mod_gemma')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Iván, seleccioná el cerebro activo:", reply_markup=reply_markup)
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+        base64_image = base64.b64encode(photo_bytes).decode('utf-8')
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    nuevo_modelo = "openai" if query.data == 'set_mod_openai' else "gemma"
-    await update_model_pref(query.message.chat_id, nuevo_modelo)
-    await query.edit_message_text(text=f"✅ Ahora estoy usando {nuevo_modelo.upper()}.")
+        prompt = update.message.caption or "Analizá esta imagen detalladamente como un experto en ciberseguridad e infraestructura."
+        
+        # Las imágenes SIEMPRE van a OpenAI (Gemma no tiene visión)
+        response = await openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ],
+                }
+            ],
+            max_tokens=500
+        )
+        
+        ans = response.choices[0].message.content
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=ans)
+        await safe_save(chat_id, "user", f"[IMAGEN]: {prompt}")
+        await safe_save(chat_id, "assistant", ans)
+
+    except Exception as e:
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=f"Error analizando imagen: {str(e)[:100]}")
 
 # ---------------------------------------------------
-# 🧠 PROCESAMIENTO DE MENSAJES
+# 🧠 LÓGICA DE MENSAJES (HÍBRIDO REAL)
 # ---------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text or ""
+    
+    # 1. Enviar estado "Escribiendo..."
+    await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
     status = await update.message.reply_text("...")
 
     try:
-        config = await get_config(chat_id)
         history = await get_history(chat_id)
-        pref = config.get("selected_model", "openai")
         
-        try:
-            with open("self.txt", "r", encoding="utf-8") as f: personality = f.read().strip()
-        except: personality = "Sos Bozi-bot, asistente de Iván."
+        # 2. Router Híbrido Simplificado
+        # Si el texto tiene palabras técnicas, usamos OpenAI. Si es charla, OpenRouter.
+        tech_keywords = ["error", "log", "configurá", "ataque", "hacker", "ip", "script", "codigo", "python", "base de datos"]
+        is_technical = any(word in user_text.lower() for word in tech_keywords)
+        
+        # Si es técnico -> OpenAI | Si es charla -> OpenRouter
+        client = openai_client if is_technical else openrouter_client
+        model = OPENAI_MODEL if is_technical else OPENROUTER_MODEL
+        
+        logging.info(f"Ruteando mensaje a: {model}")
 
-        messages = [{"role": "system", "content": f"{personality}\nFecha: {datetime.now(LOCAL_TZ)}"}]
+        messages = [{"role": "system", "content": "Sos Bozi-bot, el asistente experto de Iván. Respondé de forma humana y profesional en español."}]
         for h in history: messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": user_text})
 
-        ans = ""
-        # Lógica de motores con orden según preferencia
-        engines = [(openai_client, OPENAI_MODEL_TECNICO), (openrouter_client, OPENROUTER_MODEL_CHAT)]
-        if pref == "gemma": engines = list(reversed(engines))
+        # Generación con un solo reintento de fallback
+        try:
+            res = await client.chat.completions.create(model=model, messages=messages, temperature=0.7)
+            ans = res.choices[0].message.content
+        except:
+            # Fallback de emergencia a OpenAI si OpenRouter falla
+            res = await openai_client.chat.completions.create(model=OPENAI_MODEL, messages=messages)
+            ans = res.choices[0].message.content
 
-        for client, model in engines:
-            try:
-                res = await client.chat.completions.create(model=model, messages=messages, temperature=0.5)
-                ans = res.choices[0].message.content
-                break 
-            except Exception as e:
-                if "429" in str(e):
-                    logging.warning(f"⚠️ Rate limit en {model}. Reintentando con motor alternativo...")
-                    continue
-                else: raise e
-
-        if not ans: raise Exception("Sin respuesta de los proveedores de IA.")
-
-        # Limpieza de tags y respuesta limpia
-        ans = re.sub(r"\[/?INTERNAL_MONOLOGUE\]|\[/?FINAL_RESPONSE\]", "", ans).strip()
-        
         await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=ans)
         await safe_save(chat_id, "user", user_text)
         await safe_save(chat_id, "assistant", ans)
 
     except Exception as e:
-        logging.error(f"❌ ERROR: {e}")
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=f"Error: {str(e)[:60]}...")
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=f"Error: {str(e)[:50]}")
 
 # ---------------------------------------------------
-# BOOT
+# 🚀 BOOT & COMANDOS
 # ---------------------------------------------------
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🏛️ Bozi-bot V3.1 Online.\nAhora puedo ver tus imágenes y fotos de logs.\nIndicador 'Escribiendo' activo.")
+
 if __name__ == "__main__":
-    kill_telegram_conflicts(TELEGRAM_TOKEN)
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    class H(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), H).serve_forever(), daemon=True).start()
-    
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).read_timeout(30).build()
-    
-    # Registro de Handlers
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("models", cmd_models))
-    app.add_handler(CommandHandler("config", cmd_config))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo)) # Handler de visión
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    logging.info("🚀 Bozi-bot V3.0 (Full Deploy) DESPLEGADO")
-    app.run_polling(drop_pending_updates=True)
+    logging.info("🚀 Bozi-bot V3.1 (Vision + Typing) Iniciado")
+    app.run_polling()
