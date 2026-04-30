@@ -9,8 +9,11 @@ import json
 import logging
 import base64
 import asyncio 
+import requests
+import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Telegram e IA
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
