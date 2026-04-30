@@ -1,6 +1,6 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 3.2 (PROJECTS + TASKS + WEB SEARCH + CONFIG FIX)
+# Versión: 3.2.1 (FIX: OPENROUTER ENDPOINT 404)
 # ===================================================
 
 import os
@@ -35,7 +35,8 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 LOCAL_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 OPENAI_MODEL = "gpt-4o-mini"
-OPENROUTER_MODEL = "google/gemma-7b-it:free"
+# --- FIX AQUÍ: Cambiamos Gemma por Mistral (Gratis y Estable) ---
+OPENROUTER_MODEL = "mistralai/mistral-7b-instruct:free" 
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 openrouter_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
@@ -137,17 +138,17 @@ async def cmd_list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 # ---------------------------------------------------
-# ⚙️ CONFIG (FIXED)
+# ⚙️ CONFIG
 # ---------------------------------------------------
 async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     config = await get_config(chat_id)
-    modelo = config.get("selected_model", "openai/gemma (hybrid)")
+    modelo = config.get("selected_model", "openai/mistral (hybrid)")
     
     msg = (
         f"⚙️ **Estado de Bozi-bot**\n\n"
         f"👤 **Usuario:** Iván\n"
-        f"🧠 **Modelo:** {modelo.upper()}\n"
+        f"🧠 **Modelo Chat:** Mistral 7B (Free)\n"
         f"🛰️ **Web Search:** Activo (Tavily)\n"
         f"👁️ **Visión:** GPT-4o-mini"
     )
@@ -197,13 +198,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         web_context = ""
         if needs_search:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text="🔍 Buscando en la web...")
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=    "🔍 Buscando en la web...")
             web_context = await search_web(user_text)
 
         # Router Híbrido
         tech_keywords = ["error", "log", "configurá", "ataque", "hacker", "ip", "script", "codigo", "python", "sql"]
         is_technical = any(word in user_text.lower() for word in tech_keywords) or needs_search
         
+        # FIX APLICADO: Ahora client y model apuntan al modelo Mistral gratis si no es técnico
         client = openai_client if is_technical else openrouter_client
         model = OPENAI_MODEL if is_technical else OPENROUTER_MODEL
         
@@ -215,8 +217,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for h in history: messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": user_text})
 
-        res = await client.chat.completions.create(model=model, messages=messages, temperature=0.7)
-        ans = res.choices[0].message.content
+        # Generación conFallback de emergencia (si OpenRouter falla, usa OpenAI)
+        try:
+            res = await client.chat.completions.create(model=model, messages=messages, temperature=0.7)
+            ans = res.choices[0].message.content
+        except Exception as api_error:
+            # Si falla OpenRouter, OpenAI sale al rescate para que no se corte la charla
+            logging.error(f"Error en motor primario {model}: {api_error}. Usando fallback...")
+            res = await openai_client.chat.completions.create(model=OPENAI_MODEL, messages=messages)
+            ans = res.choices[0].message.content
 
         await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=ans)
         await safe_save(chat_id, "user", user_text)
@@ -229,7 +238,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 🚀 BOOT
 # ---------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏛️ Bozi-bot V3.2 Online.\nProyectos, Tareas y Búsqueda Web activos.")
+    await update.message.reply_text("🏛️ Bozi-bot V3.2.1 Online.\nFix aplicado en motor OpenRouter.")
 
 if __name__ == "__main__":
     url_delete = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=True"
@@ -241,7 +250,6 @@ if __name__ == "__main__":
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # HANDLERS REGISTRADOS (Fix config y nuevos comandos)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("config", cmd_config))
     app.add_handler(CommandHandler("add_project", cmd_add_project))
@@ -250,5 +258,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    logging.info("🚀 Bozi-bot V3.2 (Sprint 1) Iniciado")
+    logging.info("🚀 Bozi-bot V3.2.1 (Fix OpenRouter) Iniciado")
     app.run_polling(drop_pending_updates=True)
