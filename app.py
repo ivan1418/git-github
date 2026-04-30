@@ -90,16 +90,39 @@ async def get_best_client_and_model(intent: str):
 # 🏛️ HELPERS REALES DE SUPABASE (Async)
 # ---------------------------------------------------
 async def get_bot_config_async(chat_id):
+    """
+    Lee la configuración de Iván (como el modelo que usa) de Supabase.
+    """
+    logging.info(f"🧠 Leyendo config para {chat_id} de Supabase.")
     try:
-        res = supabase.table("bot_config").select("*").eq("chat_id", chat_id).execute()
-        return res.data[0] if res.data else {}
-    except: return {}
+        # Consultamos la tabla 'bot_config'
+        response = supabase.table("bot_config").select("*").eq("chat_id", chat_id).execute()
+        if response.data:
+            # Si existís, te devolvemos tu config
+            return response.data[0]
+        else:
+            # Si sos nuevo, devolvemos un diccionario vacío
+            return {}
+            
+    except Exception as e:
+        logging.error(f"❌ Error leyendo config de Supabase: {e}")
+        return {} # Fallback ante error
 
 async def save_memory_async(chat_id, role, content):
+    """
+    Toma el mensaje de Iván o del Bot y lo guarda en Supabase.
+    """
+    logging.info(f"💾 Guardando memoria ({role}) en Supabase.")
     try:
-        supabase.table("bot_memory").insert({"chat_id": chat_id, "role": role, "content": content}).execute()
+        # Usamos el cliente 'supabase' que ya está inicializado arriba
+        supabase.table("bot_memory").insert({
+            "chat_id": chat_id,
+            "role": role,
+            "content": content
+        }).execute()
+        # logging.info("✅ Guardado.")
     except Exception as e:
-        logging.error(f"Error Supabase: {e}")
+        logging.error(f"❌ Error guardando memoria en Supabase: {e}")
 
 async def get_recent_history_async(chat_id, limit=MAX_HISTORY_MESSAGES):
     try:
