@@ -1,6 +1,6 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 2.6 (ULTRA-STABLE + DEBUG + KILL SWITCH)
+# Versión: 2.8 (TIER 1 OPTIMIZED + AUTO-RETRY + KILL SWITCH)
 # ===================================================
 
 import os
@@ -42,7 +42,7 @@ openrouter_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------------------------------------------------
-# 🧹 KILL SWITCH
+# 🧹 KILL SWITCH: LIMPIEZA DE CONFLICTOS
 # ---------------------------------------------------
 def kill_telegram_conflicts(token):
     url = f"https://api.telegram.org/bot{token}/deleteWebhook?drop_pending_updates=True"
@@ -53,44 +53,27 @@ def kill_telegram_conflicts(token):
         logging.error(f"❌ Error en Kill Switch: {e}")
 
 # ---------------------------------------------------
-# 🤖 PERSONALIDAD
-# ---------------------------------------------------
-def load_personality():
-    try:
-        with open("self.txt", "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except:
-        return "Sos Bozi-bot, asistente técnico de Iván."
-
-PERSONALITY = load_personality()
-
-# ---------------------------------------------------
-# 🏛️ FUNCIONES DE DATOS (REFORZADAS CON FALLBACK)
+# 🏛️ FUNCIONES DE DATOS (REFORZADAS)
 # ---------------------------------------------------
 async def get_config(chat_id):
     try:
         res = supabase.table("bot_config").select("*").eq("chat_id", chat_id).execute()
         return res.data[0] if res.data else {}
-    except Exception as e:
-        logging.error(f"DB Error (Config): {e}")
-        return {}
+    except: return {}
 
 async def get_history(chat_id):
     try:
-        res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(20).execute()
+        res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(10).execute()
         return list(reversed(res.data)) if res.data else []
-    except Exception as e:
-        logging.error(f"DB Error (History): {e}")
-        return []
+    except: return []
 
 async def safe_save(chat_id, role, content):
     try:
         supabase.table("bot_memory").insert({"chat_id": chat_id, "role": role, "content": content}).execute()
-    except Exception as e:
-        logging.error(f"DB Error (Save): {e}")
+    except: pass
 
 # ---------------------------------------------------
-# 🔥 PROCESAMIENTO DE MENSAJES
+# 🔥 PROCESAMIENTO DE MENSAJES (OPTIMIZADO TIER 1)
 # ---------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -98,68 +81,71 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text("...")
 
     try:
-        # 1. Obtener contexto (con resiliencia)
+        # 1. Carga de datos
         config = await get_config(chat_id)
         history = await get_history(chat_id)
         
-        # 2. Router (Siempre OpenAI para inteligencia)
+        # 2. Router Optimizado (Ahorra llamadas en Tier 1)
         intent = "NORMAL_CHAT"
-        try:
-            route_res = await openai_client.chat.completions.create(
-                model=OPENAI_MODEL_TECNICO,
-                messages=[{"role": "system", "content": "Decide intent: NORMAL_CHAT or CIBERSEC_TASK. Return JSON: {'intent': '...'}"}, {"role": "user", "content": user_text}],
-                response_format={"type": "json_object"}
-            )
-            intent = json.loads(route_res.choices[0].message.content).get("intent", "NORMAL_CHAT")
-        except: pass
+        if len(user_text) > 15:
+            try:
+                route_res = await openai_client.chat.completions.create(
+                    model=OPENAI_MODEL_TECNICO,
+                    messages=[{"role": "system", "content": "JSON: {'intent': 'NORMAL_CHAT' | 'CIBERSEC_TASK'}"}, {"role": "user", "content": user_text}],
+                    response_format={"type": "json_object"},
+                    temperature=0
+                )
+                intent = json.loads(route_res.choices[0].message.content).get("intent", "NORMAL_CHAT")
+            except: pass
 
-        # 3. Elección de Motor Híbrido
-        client = openai_client if intent == "CIBERSEC_TASK" else openrouter_client
-        model = OPENAI_MODEL_TECNICO if intent == "CIBERSEC_TASK" else OPENROUTER_MODEL_CHAT
-
-        # 4. Generar respuesta
-        messages = [{"role": "system", "content": f"{PERSONALITY}\nResponde de forma natural."}]
-        for h in history:
-            messages.append({"role": h["role"], "content": h["content"]})
+        # 3. Preparación de mensajes
+        with open("self.txt", "r", encoding="utf-8") as f: personality = f.read().strip()
+        messages = [{"role": "system", "content": f"{personality}\nFecha: {datetime.now(LOCAL_TZ)}"}]
+        for h in history: messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": user_text})
 
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.5
-        )
-        
-        ans = response.choices[0].message.content
-        
-        # Limpieza simple de tags si existieran
-        ans = re.sub(r"\[/?INTERNAL_MONOLOGUE\]|\[/?FINAL_RESPONSE\]", "", ans).strip()
+        # 4. Generación con Reintento por Rate Limit (429)
+        ans = ""
+        for attempt in range(3):
+            try:
+                client = openrouter_client if intent == "NORMAL_CHAT" else openai_client
+                model = OPENROUTER_MODEL_CHAT if intent == "NORMAL_CHAT" else OPENAI_MODEL_TECNICO
+                
+                res = await client.chat.completions.create(model=model, messages=messages, temperature=0.5)
+                ans = res.choices[0].message.content
+                break 
+            except Exception as e:
+                if "429" in str(e) and attempt < 2:
+                    logging.warning(f"⚠️ Rate limit Tier 1. Reintentando en 2.5s...")
+                    await asyncio.sleep(2.5)
+                else: raise e
 
-        # 5. Enviar y Guardar
+        # 5. Limpieza y Envío
+        ans = re.sub(r"\[/?INTERNAL_MONOLOGUE\]|\[/?FINAL_RESPONSE\]", "", ans).strip()
         await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=ans)
         await safe_save(chat_id, "user", user_text)
         await safe_save(chat_id, "assistant", ans)
 
     except Exception as e:
-        logging.error(f"❌ ERROR CRÍTICO: {e}")
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=f"Error técnico: {str(e)[:100]}")
+        logging.error(f"❌ ERROR: {e}")
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=f"Error: {str(e)[:50]}... Reintentá en un momento.")
 
 # ---------------------------------------------------
 # START Y BOOT
 # ---------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏛️ Bozi-bot Elite Online. Sistema reforzado.")
+    await update.message.reply_text("🏛️ Bozi-bot Online. Modo persistente activado.")
 
 if __name__ == "__main__":
     kill_telegram_conflicts(TELEGRAM_TOKEN)
     
-    # Healthcheck para Render
     class H(BaseHTTPRequestHandler):
         def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), H).serve_forever(), daemon=True).start()
     
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).read_timeout(30).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    logging.info("🚀 Bozi-bot V2.6 DESPLEGADO")
+    logging.info("🚀 Bozi-bot V2.8 DESPLEGADO")
     app.run_polling(drop_pending_updates=True)
