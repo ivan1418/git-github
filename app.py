@@ -225,19 +225,20 @@ async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 if __name__ == "__main__":
+    # Limpieza inicial de Webhook
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=True")
     
+    # Servidor Web en hilo separado
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), DashboardHandler).serve_forever(), daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🏛️ Bozi-bot V3.3.1 Online.\nDashboard en /projects.")))
-    app.add_handler(CommandHandler("config", cmd_config))
-    app.add_handler(CommandHandler("add_project", cmd_add_project))
-    app.add_handler(CommandHandler("edit_project", cmd_edit_project))
-    app.add_handler(CommandHandler("list_projects", cmd_list_projects))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    
+    # ... tus handlers ...
+
     logging.info("🚀 Bozi-bot V3.3.1 (Stable Dashboard) Iniciado")
+    
+    # AGREGÁ ESTO: Un pequeño respiro para que el proceso viejo muera del todo
+    import time
+    time.sleep(5) 
+    
     app.run_polling(drop_pending_updates=True)
