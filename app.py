@@ -1,6 +1,6 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 2.9 (MANUAL MODEL SELECT + AUTO-FALLBACK + KILL SWITCH)
+# Versión: 3.0 (FULL COMMANDS + MANUAL SELECT + KILL SWITCH)
 # ===================================================
 
 import os
@@ -73,7 +73,7 @@ async def update_model_pref(chat_id, model_name):
 
 async def get_history(chat_id):
     try:
-        res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(10).execute()
+        res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(20).execute()
         return list(reversed(res.data)) if res.data else []
     except: return []
 
@@ -83,10 +83,25 @@ async def safe_save(chat_id, role, content):
     except: pass
 
 # ---------------------------------------------------
-# 🔥 COMANDOS Y BOTONES
+# 🔥 COMANDOS (Handlers)
 # ---------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏛️ Bozi-bot Elite Online.\nUsá /models para elegir tu IA preferida.\nCEO: Iván.")
+    await update.message.reply_text("🏛️ Bozi-bot Elite Online.\nUsa /models para elegir tu IA o /config para ver el estado.\nCEO: Iván.")
+
+async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    config = await get_config(chat_id)
+    
+    modelo = config.get("selected_model", "openai (default)")
+    modo = config.get("mode", "asistente")
+    
+    texto = (
+        f"⚙️ *Configuración de Bozi-bot*\n\n"
+        f"🧠 *Modelo Activo:* {modelo.upper()}\n"
+        f"🛠️ *Modo:* {modo}\n"
+        f"📅 *Actualizado:* {config.get('updated_at', 'N/A')}"
+    )
+    await update.message.reply_text(texto, parse_mode="Markdown")
 
 async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -114,35 +129,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         config = await get_config(chat_id)
         history = await get_history(chat_id)
-        
-        # Preferencia del usuario o default
         pref = config.get("selected_model", "openai")
         
-        with open("self.txt", "r", encoding="utf-8") as f: personality = f.read().strip()
+        try:
+            with open("self.txt", "r", encoding="utf-8") as f: personality = f.read().strip()
+        except: personality = "Sos Bozi-bot, asistente de Iván."
+
         messages = [{"role": "system", "content": f"{personality}\nFecha: {datetime.now(LOCAL_TZ)}"}]
         for h in history: messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": user_text})
 
-        # Intento de generación con Fallback automático
         ans = ""
-        # Definimos orden según preferencia
-        clients = [(openai_client, OPENAI_MODEL_TECNICO), (openrouter_client, OPENROUTER_MODEL_CHAT)]
-        if pref == "gemma": clients = list(reversed(clients))
+        # Lógica de motores con orden según preferencia
+        engines = [(openai_client, OPENAI_MODEL_TECNICO), (openrouter_client, OPENROUTER_MODEL_CHAT)]
+        if pref == "gemma": engines = list(reversed(engines))
 
-        for client, model in clients:
+        for client, model in engines:
             try:
                 res = await client.chat.completions.create(model=model, messages=messages, temperature=0.5)
                 ans = res.choices[0].message.content
                 break 
             except Exception as e:
                 if "429" in str(e):
-                    logging.warning(f"⚠️ Rate limit en {model}. Probando respaldo...")
+                    logging.warning(f"⚠️ Rate limit en {model}. Reintentando con motor alternativo...")
                     continue
                 else: raise e
 
-        if not ans: raise Exception("No hubo respuesta de ninguna IA.")
+        if not ans: raise Exception("Sin respuesta de los proveedores de IA.")
 
+        # Limpieza de tags y respuesta limpia
         ans = re.sub(r"\[/?INTERNAL_MONOLOGUE\]|\[/?FINAL_RESPONSE\]", "", ans).strip()
+        
         await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=ans)
         await safe_save(chat_id, "user", user_text)
         await safe_save(chat_id, "assistant", ans)
@@ -162,10 +179,13 @@ if __name__ == "__main__":
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), H).serve_forever(), daemon=True).start()
     
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).read_timeout(30).build()
+    
+    # Registro de Handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("models", cmd_models))
+    app.add_handler(CommandHandler("config", cmd_config))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    logging.info("🚀 Bozi-bot V2.9 DESPLEGADO")
+    logging.info("🚀 Bozi-bot V3.0 (Full Deploy) DESPLEGADO")
     app.run_polling(drop_pending_updates=True)
