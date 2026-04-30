@@ -1,6 +1,6 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 3.3 (DASHBOARD WEB + PROJECT EDITOR + TAVILY)
+# Versión: 3.3.1 (STABLE DASHBOARD + HEAD METHOD + CONFIG SYNC)
 # ===================================================
 
 import os
@@ -45,9 +45,14 @@ TECH_KEYWORDS = ["error", "log", "configurá", "ataque", "hacker", "ip", "script
 SEARCH_KEYWORDS = ["noticias", "quien es", "hackeo reciente", "buscá", "investigá", "ultimo", "hoy"]
 
 # ---------------------------------------------------
-# 🌐 SERVIDOR WEB (DASHBOARD DINÁMICO)
+# 🌐 SERVIDOR WEB (DASHBOARD DINÁMICO + STABILITY FIX)
 # ---------------------------------------------------
 class DashboardHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        """Responde a los health checks de Render para evitar reinicios"""
+        self.send_response(200)
+        self.end_headers()
+
     def do_GET(self):
         if self.path == "/projects" or self.path == "/dashboard":
             try:
@@ -66,7 +71,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 
                 html = f"""
                 <html>
-                <head><title>Bozi-Bot Project Visualizer</title>
+                <head><title>Bozi-Bot Dashboard</title>
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <style>body{{font-family:sans-serif; background:#121212; color:white; padding:20px; max-width:800px; margin:auto;}}</style>
                 </head>
@@ -83,7 +88,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.wfile.write(html.encode())
             except Exception as e:
                 self.send_response(500); self.end_headers()
-                self.wfile.write(f"Error cargando dashboard: {e}".encode())
+                self.wfile.write(f"Error: {e}".encode())
         else:
             self.send_response(200); self.end_headers()
             self.wfile.write(b"Bozi-bot Online")
@@ -151,9 +156,10 @@ async def cmd_edit_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_list_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         res = supabase.table("projects").select("*").eq("chat_id", update.effective_chat.id).execute()
-        if not res.data: await update.message.reply_text("No hay proyectos."); return
+        if not res.data: await update.message.reply_text("No hay proyectos cargados."); return
         msg = "📂 **Tus Proyectos:**\n\n"
-        for p in res.data: msg += f"🔹 **{p['name']}**\n🔗 [Ver Dashboard](https://git-github-47x8.onrender.com/projects)\n🔗 [URL Directa]({p['url']})\n\n"
+        for p in res.data: 
+            msg += f"🔹 **{p['name']}**\n🔗 [Ver Dashboard](https://git-github-47x8.onrender.com/projects)\n🔗 [URL Directa]({p['url']})\n\n"
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e: await update.message.reply_text(f"❌ Error: {e}")
 
@@ -214,7 +220,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 🚀 BOOT
 # ---------------------------------------------------
 async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (f"⚙️ **Estado Real de Bozi-bot V3.3**\n\n👤 **Usuario:** Iván\n🧠 **Cerebro Superior:** OpenAI GPT-4o-mini\n🧠 **Cerebro Chat:** Mistral 7B (Free)\n\n"
+    msg = (f"⚙️ **Estado Real de Bozi-bot V3.3.1**\n\n👤 **Usuario:** Iván\n🧠 **Cerebro Superior:** OpenAI GPT-4o-mini\n🧠 **Cerebro Chat:** Mistral 7B (Free)\n\n"
            f"🔗 [Abrir Panel de Proyectos](https://git-github-47x8.onrender.com/projects)")
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -225,7 +231,7 @@ if __name__ == "__main__":
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🏛️ Bozi-bot V3.3 Online.\nDashboard en /projects.")))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🏛️ Bozi-bot V3.3.1 Online.\nDashboard en /projects.")))
     app.add_handler(CommandHandler("config", cmd_config))
     app.add_handler(CommandHandler("add_project", cmd_add_project))
     app.add_handler(CommandHandler("edit_project", cmd_edit_project))
@@ -233,5 +239,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    logging.info("🚀 Bozi-bot V3.3 (Dashboard Activo) Iniciado")
+    logging.info("🚀 Bozi-bot V3.3.1 (Stable Dashboard) Iniciado")
     app.run_polling(drop_pending_updates=True)
