@@ -77,7 +77,7 @@ async def get_config(chat_id):
 
 async def get_history(chat_id):
     try:
-        res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(5).execute()
+        res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(20).execute()
         return list(reversed(res.data)) if res.data else []
     except Exception as e:
         logging.error(f"DB Error (History): {e}")
