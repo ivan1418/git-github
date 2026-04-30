@@ -158,49 +158,45 @@ def build_chat_input(user_text, history, active_context):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text or ""
-    status_message = None 
-    full_response_raw_text = ""
+    
+    # Placeholder rápido para que sepas que te escuchó
+    status_message = await update.message.reply_text("...")
 
     try:
+        # 1. Carga de datos real
         config = await get_bot_config_async(chat_id)
         history = await get_recent_history_async(chat_id)
         active_ctx = await build_active_context_async(chat_id)
+        
+        # 2. Decisión de qué IA usar (Router)
         route = await classify_contextual_route_async(user_text, chat_id, history, active_ctx)
         intent = route.get("intent", "NORMAL_CHAT")
-
         client, model = await get_best_client_and_model(intent)
-        input_msgs = build_chat_input(user_text, history, active_ctx)
 
-        response_stream = await client.chat.completions.create(
-            model=model, messages=[{"role": "system", "content": build_runtime_system_prompt(config)}] + input_msgs,
-            temperature=0.4, stream=True
+        # 3. Llamada a la IA (Sin streaming por ahora para asegurar respuesta)
+        messages = [{"role": "system", "content": build_runtime_system_prompt(config)}]
+        messages += build_chat_input(user_text, history, active_ctx)
+
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.4
         )
-
-        status_message = await update.message.reply_text("...")
-        words_to_edit = 0
-
-        async for chunk in response_stream:
-            content = getattr(chunk.choices[0].delta, 'content', "")
-            if not content: continue
-            full_response_raw_text += content
-            
-            if "[FINAL_RESPONSE]" in full_response_raw_text:
-                final_text = full_response_raw_text.split("[FINAL_RESPONSE]")[-1].replace("[/FINAL_RESPONSE]", "").strip()
-                words_to_edit += 1
-                if words_to_edit > 15 or "\n" in content:
-                    try:
-                        await context.bot.edit_message_text(chat_id=chat_id, message_id=status_message.message_id, text=final_text)
-                        await asyncio.sleep(0.05)
-                    except: pass
-                    words_to_edit = 0
-
-        final_ans = full_response_raw_text.split("[FINAL_RESPONSE]")[-1].replace("[/FINAL_RESPONSE]", "").strip() if "[FINAL_RESPONSE]" in full_response_raw_text else full_response_raw_text
+        
+        full_text = response.choices[0].message.content
+        
+        # 4. Limpiar CoT y responder
+        final_ans = full_text.split("[FINAL_RESPONSE]")[-1].replace("[/FINAL_RESPONSE]", "").strip() if "[FINAL_RESPONSE]" in full_text else full_text
+        
         await context.bot.edit_message_text(chat_id=chat_id, message_id=status_message.message_id, text=final_ans)
+
+        # 5. Guardar en Supabase
         await save_memory_async(chat_id, "user", user_text)
         await save_memory_async(chat_id, "assistant", final_ans)
-        
+
     except Exception as e:
-        logging.error(f"Error: {e}")
+        logging.error(f"Error en handle_message: {e}")
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=status_message.message_id, text="Perdón Iván, se me cruzaron los cables procesando eso.")
 
 # ---------------------------------------------------
 # PANEL Y START
