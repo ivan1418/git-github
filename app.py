@@ -148,11 +148,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏛️ Bozi-bot V3.1 Online.\nAhora puedo ver tus imágenes y fotos de logs.\nIndicador 'Escribiendo' activo.")
 
 if __name__ == "__main__":
+    # 1. Limpiamos cualquier sesión previa antes de arrancar
+    url_delete = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=True"
+    requests.post(url_delete)
+    
+    # 2. Arrancamos el servidor de healthcheck para Render
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), H).serve_forever(), daemon=True).start()
+
+    # 3. Iniciamos la App
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo)) # Handler de visión
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    logging.info("🚀 Bozi-bot V3.1 (Vision + Typing) Iniciado")
-    app.run_polling()
+    logging.info("🚀 Bozi-bot V3.1 (Reinforced) Iniciado")
+    app.run_polling(drop_pending_updates=True) # Agregamos esto para limpiar basura al entrar
