@@ -1,6 +1,6 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 2.3 (CORRECCIÓN DE VARIABLES + Supabase REAL)
+# Versión: 2.5 (KILL SWITCH + STABLE RESPONSE + Supabase REAL)
 # ===================================================
 
 import os
@@ -15,38 +15,27 @@ from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Telegram y Scheduler
+# Telegram y IA
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 from openai import AsyncOpenAI
-
-# Clientes externos
 from supabase import create_client
 
 # ---------------------------------------------------
-# ⚙️ CONFIGURACIÓN Y VARIABLES CRÍTICAS
+# ⚙️ CONFIGURACIÓN Y VARIABLES
 # ---------------------------------------------------
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# --- VARIABLES DE MEMORIA (DEFINIDAS ARRIBA PARA EVITAR ERROR) ---
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "8"))
-MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1300"))
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-LOCAL_TZ_NAME = "America/Argentina/Buenos_Aires"
-LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
-
-# Modelos
+LOCAL_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 OPENAI_MODEL_TECNICO = "gpt-4o-mini"
 OPENROUTER_MODEL_CHAT = "google/gemma-4-31b-it:free"
-
-if not all([TELEGRAM_TOKEN, SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY]):
-    raise ValueError("❌ Faltan Variables de Entorno en Render.")
 
 # Clientes
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -54,76 +43,47 @@ openrouter_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------------------------------------------------
-# 🤖 CARGA DE PERSONALIDAD (self.txt)
+# 🧹 KILL SWITCH: LIMPIEZA DE CONFLICTOS
+# ---------------------------------------------------
+def kill_telegram_conflicts(token):
+    """Fuerza a Telegram a cerrar cualquier conexión previa para evitar el error de Conflict."""
+    url = f"https://api.telegram.org/bot{token}/deleteWebhook?drop_pending_updates=True"
+    try:
+        response = requests.post(url, timeout=10)
+        if response.status_code == 200:
+            logging.info("🧹 Sesiones previas y mensajes acumulados eliminados.")
+        else:
+            logging.warning(f"⚠️ Aviso en limpieza: {response.status_code}")
+    except Exception as e:
+        logging.error(f"❌ Error en Kill Switch: {e}")
+
+# ---------------------------------------------------
+# 🤖 PERSONALIDAD Y PROMPTS
 # ---------------------------------------------------
 def load_prompt_file(filename):
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             return f.read().strip()
-    except Exception:
-        return "Sos Bozi-bot, asistente de Iván."
+    except Exception: return "Sos Bozi-bot, asistente de Iván."
 
 SELF_PROMPT_CIBERSEC = load_prompt_file("self.txt")
 
-CONTEXT_ROUTER_PROMPT = """
-Sos el cerebro estratégico de Bozi-bot. Analizá el mensaje.
-Devolvé SOLO JSON: {"intent": "NORMAL_CHAT | CIBERSEC_TASK | PROJECT_EDIT | TASK_CREATE | IMAGE_ANALYSIS", "reason": "explicación"}
-"""
-
 def build_runtime_system_prompt(config):
-    format_instruction = """
-RESPONDÉ OBLIGATORIAMENTE EN ESTE FORMATO:
-[INTERNAL_MONOLOGUE] (pensamiento) [/INTERNAL_MONOLOGUE]
-[FINAL_RESPONSE] (respuesta para Iván) [/FINAL_RESPONSE]
-"""
-    return f"{SELF_PROMPT_CIBERSEC}\nMODO: {config.get('mode', 'asistente')}\n{format_instruction}"
+    return f"{SELF_PROMPT_CIBERSEC}\nMODO: {config.get('mode', 'asistente')}\nFORMATO: [INTERNAL_MONOLOGUE]...[/INTERNAL_MONOLOGUE] [FINAL_RESPONSE]..."
 
 # ---------------------------------------------------
-# 🧠 LÓGICA HÍBRIDA (Async)
-# ---------------------------------------------------
-async def get_best_client_and_model(intent: str):
-    complex_intents = {"CIBERSEC_TASK", "PROJECT_EDIT", "TASK_CREATE", "IMAGE_ANALYSIS", "CONFIG_UPDATE", "TASK_EDIT_ACTIVE"}
-    if intent.upper() in complex_intents:
-        return openai_client, OPENAI_MODEL_TECNICO
-    return openrouter_client, OPENROUTER_MODEL_CHAT
-
-# ---------------------------------------------------
-# 🏛️ HELPERS REALES DE SUPABASE (Async)
+# 🧠 HELPERS DE DATOS (Supabase REAL)
 # ---------------------------------------------------
 async def get_bot_config_async(chat_id):
-    """
-    Lee la configuración de Iván (como el modelo que usa) de Supabase.
-    """
-    logging.info(f"🧠 Leyendo config para {chat_id} de Supabase.")
     try:
-        # Consultamos la tabla 'bot_config'
-        response = supabase.table("bot_config").select("*").eq("chat_id", chat_id).execute()
-        if response.data:
-            # Si existís, te devolvemos tu config
-            return response.data[0]
-        else:
-            # Si sos nuevo, devolvemos un diccionario vacío
-            return {}
-            
-    except Exception as e:
-        logging.error(f"❌ Error leyendo config de Supabase: {e}")
-        return {} # Fallback ante error
+        res = supabase.table("bot_config").select("*").eq("chat_id", chat_id).execute()
+        return res.data[0] if res.data else {}
+    except: return {}
 
 async def save_memory_async(chat_id, role, content):
-    """
-    Toma el mensaje de Iván o del Bot y lo guarda en Supabase.
-    """
-    logging.info(f"💾 Guardando memoria ({role}) en Supabase.")
     try:
-        # Usamos el cliente 'supabase' que ya está inicializado arriba
-        supabase.table("bot_memory").insert({
-            "chat_id": chat_id,
-            "role": role,
-            "content": content
-        }).execute()
-        # logging.info("✅ Guardado.")
-    except Exception as e:
-        logging.error(f"❌ Error guardando memoria en Supabase: {e}")
+        supabase.table("bot_memory").insert({"chat_id": chat_id, "role": role, "content": content}).execute()
+    except Exception as e: logging.error(f"Error Supabase: {e}")
 
 async def get_recent_history_async(chat_id, limit=MAX_HISTORY_MESSAGES):
     try:
@@ -132,105 +92,91 @@ async def get_recent_history_async(chat_id, limit=MAX_HISTORY_MESSAGES):
     except: return []
 
 async def build_active_context_async(chat_id):
-    # Contexto simplificado para estabilidad
-    return f"Time: {datetime.now(LOCAL_TZ)}"
+    return f"Fecha/Hora actual: {datetime.now(LOCAL_TZ).strftime('%Y-%m-%d %H:%M:%S')}"
 
 async def classify_contextual_route_async(text, chat_id, history, active_ctx):
     try:
+        prompt = "Decidí si el mensaje es NORMAL_CHAT o CIBERSEC_TASK. Devolvé JSON: {'intent': '...'}"
         res = await openai_client.chat.completions.create(
             model=OPENAI_MODEL_TECNICO,
-            messages=[{"role": "system", "content": CONTEXT_ROUTER_PROMPT}, {"role": "user", "content": f"Context: {active_ctx}\nMsg: {text}"}],
+            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": text}],
             response_format={ "type": "json_object" }
         )
         return json.loads(res.choices[0].message.content)
     except: return {"intent": "NORMAL_CHAT"}
 
+async def get_best_client_and_model(intent: str):
+    if intent.upper() in ["CIBERSEC_TASK", "PROJECT_EDIT", "IMAGE_ANALYSIS"]:
+        return openai_client, OPENAI_MODEL_TECNICO
+    return openrouter_client, OPENROUTER_MODEL_CHAT
+
 def build_chat_input(user_text, history, active_context):
-    messages = []
-    for h in history:
-        messages.append({"role": h['role'], "content": h['content']})
-    messages.append({"role": "user", "content": f"Context: {active_context}\n{user_text}"})
-    return messages
+    msgs = [{"role": h['role'], "content": h['content']} for h in history]
+    msgs.append({"role": "user", "content": f"Context: {active_context}\n{user_text}"})
+    return msgs
 
 # ---------------------------------------------------
-# 🔥 MANEJO DE MENSAJES (Streaming)
+# 🔥 HANDLER DE MENSAJES (Versión Robusta)
 # ---------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text or ""
-    
-    # Placeholder rápido para que sepas que te escuchó
     status_message = await update.message.reply_text("...")
 
     try:
-        # 1. Carga de datos real
+        # Carga de contexto
         config = await get_bot_config_async(chat_id)
         history = await get_recent_history_async(chat_id)
         active_ctx = await build_active_context_async(chat_id)
         
-        # 2. Decisión de qué IA usar (Router)
+        # IA Híbrida
         route = await classify_contextual_route_async(user_text, chat_id, history, active_ctx)
-        intent = route.get("intent", "NORMAL_CHAT")
-        client, model = await get_best_client_and_model(intent)
+        client, model = await get_best_client_and_model(route.get("intent", "NORMAL_CHAT"))
 
-        # 3. Llamada a la IA (Sin streaming por ahora para asegurar respuesta)
-        messages = [{"role": "system", "content": build_runtime_system_prompt(config)}]
-        messages += build_chat_input(user_text, history, active_ctx)
-
+        # Llamada a IA
         response = await client.chat.completions.create(
             model=model,
-            messages=messages,
+            messages=[{"role": "system", "content": build_runtime_system_prompt(config)}] + build_chat_input(user_text, history, active_ctx),
             temperature=0.4
         )
         
-        full_text = response.choices[0].message.content
-        
-        # 4. Limpiar CoT y responder
-        final_ans = full_text.split("[FINAL_RESPONSE]")[-1].replace("[/FINAL_RESPONSE]", "").strip() if "[FINAL_RESPONSE]" in full_text else full_text
-        
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=status_message.message_id, text=final_ans)
+        raw_text = response.choices[0].message.content
 
-        # 5. Guardar en Supabase
+        # Limpieza inteligente de respuesta
+        if "[FINAL_RESPONSE]" in raw_text:
+            final_ans = raw_text.split("[FINAL_RESPONSE]")[-1].replace("[/FINAL_RESPONSE]", "").strip()
+        else:
+            final_ans = re.sub(r"\[INTERNAL_MONOLOGUE\].*?\[/INTERNAL_MONOLOGUE\]", "", raw_text, flags=re.DOTALL).strip()
+        
+        if not final_ans: final_ans = raw_text
+
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=status_message.message_id, text=final_ans)
         await save_memory_async(chat_id, "user", user_text)
         await save_memory_async(chat_id, "assistant", final_ans)
 
     except Exception as e:
-        logging.error(f"Error en handle_message: {e}")
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=status_message.message_id, text="Perdón Iván, se me cruzaron los cables procesando eso.")
+        logging.error(f"Error: {e}")
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=status_message.message_id, text="Se cruzaron los cables, Iván. Reintentá.")
 
 # ---------------------------------------------------
-# PANEL Y START
+# INICIO Y SERVER
 # ---------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🏛️ Bozi-bot Elite Online.\nModo Híbrido Async activado.\nCEO: Iván.")
+    await update.message.reply_text(f"🏛️ Bozi-bot Elite Online.\nKill Switch activado. CEO: Iván.")
 
-def start_typing_loop_sync(chat_id: int):
-    # Simplificado para no fallar
-    return lambda: None
-
-# ---------------------------------------------------
-# INICIO
-# ---------------------------------------------------
-# ---------------------------------------------------
-# INICIO (VERSION REFORZADA)
-# ---------------------------------------------------
 if __name__ == "__main__":
-    # Server simple para Render
-    class SimpleH(BaseHTTPRequestHandler):
-        def do_GET(self): 
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
+    # Limpieza inicial de conflictos
+    kill_telegram_conflicts(TELEGRAM_TOKEN)
     
+    # Server para Render
+    class SimpleH(BaseHTTPRequestHandler):
+        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), SimpleH).serve_forever(), daemon=True).start()
     
-    # --- CONFIGURACIÓN REFORZADA CONTRA TIMEOUTS ---
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).read_timeout(30).write_timeout(30).connect_timeout(30).pool_timeout(30).build()
-    
+    # App
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).read_timeout(30).connect_timeout(30).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    logging.info("Bozi-bot Central Brain (Reinforced) listo.")
-    
-    # Agregamos drop_pending_updates para limpiar mensajes viejos acumulados
-    app.run_polling(drop_pending_updates=True, timeout=20)
+    logging.info("🚀 Bozi-bot Total Secure desplegado.")
+    app.run_polling(drop_pending_updates=True)
