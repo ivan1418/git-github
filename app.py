@@ -215,16 +215,26 @@ def start_typing_loop_sync(chat_id: int):
 # ---------------------------------------------------
 # INICIO
 # ---------------------------------------------------
+# ---------------------------------------------------
+# INICIO (VERSION REFORZADA)
+# ---------------------------------------------------
 if __name__ == "__main__":
     # Server simple para Render
     class SimpleH(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-    def run_s(): HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), SimpleH).serve_forever()
-    threading.Thread(target=run_s, daemon=True).start()
+        def do_GET(self): 
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
     
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), SimpleH).serve_forever(), daemon=True).start()
+    
+    # --- CONFIGURACIÓN REFORZADA CONTRA TIMEOUTS ---
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).read_timeout(30).write_timeout(30).connect_timeout(30).pool_timeout(30).build()
+    
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    logging.info("Bozi-bot Corregido y listo.")
-    app.run_polling(drop_pending_updates=True)
+    logging.info("Bozi-bot Central Brain (Reinforced) listo.")
+    
+    # Agregamos drop_pending_updates para limpiar mensajes viejos acumulados
+    app.run_polling(drop_pending_updates=True, timeout=20)
