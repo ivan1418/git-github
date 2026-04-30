@@ -1,6 +1,6 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 3.3.1 (STABLE DASHBOARD + HEAD METHOD + CONFIG SYNC)
+# Versión: 3.3.2 (EMERGENCY RESET + STABLE POLLING)
 # ===================================================
 
 import os
@@ -11,6 +11,7 @@ import base64
 import asyncio 
 import requests
 import threading
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -45,56 +46,27 @@ TECH_KEYWORDS = ["error", "log", "configurá", "ataque", "hacker", "ip", "script
 SEARCH_KEYWORDS = ["noticias", "quien es", "hackeo reciente", "buscá", "investigá", "ultimo", "hoy"]
 
 # ---------------------------------------------------
-# 🌐 SERVIDOR WEB (DASHBOARD DINÁMICO + STABILITY FIX)
+# 🌐 SERVIDOR WEB (DASHBOARD + HEALTH CHECKS)
 # ---------------------------------------------------
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
-        """Responde a los health checks de Render para evitar reinicios"""
-        self.send_response(200)
-        self.end_headers()
+        self.send_response(200); self.end_headers()
 
     def do_GET(self):
         if self.path == "/projects" or self.path == "/dashboard":
             try:
                 res = supabase.table("projects").select("*").execute()
                 projects = res.data
-                
-                rows = ""
-                for p in projects:
-                    rows += f"""
-                    <div style='border:1px solid #444; padding:15px; margin:10px; border-radius:8px; background:#1e1e1e;'>
-                        <h2 style='color:#00ffcc; margin-top:0;'>{p['name']}</h2>
-                        <p style='color:#ccc;'>{p.get('description', 'Sin descripción')}</p>
-                        <a href='{p['url']}' target='_blank' style='color:#3399ff; text-decoration:none;'>🔗 Abrir Proyecto</a>
-                    </div>
-                    """
-                
-                html = f"""
-                <html>
-                <head><title>Bozi-Bot Dashboard</title>
-                <meta name="viewport" content="width=device-width, initial-scale=1">
-                <style>body{{font-family:sans-serif; background:#121212; color:white; padding:20px; max-width:800px; margin:auto;}}</style>
-                </head>
-                <body>
-                    <h1 style='text-align:center;'>🏛️ Panel de Proyectos - Iván</h1>
-                    <hr style='border:0; border-top:1px solid #333;'>
-                    {rows if rows else "<p>No hay proyectos cargados aún.</p>"}
-                </body>
-                </html>
-                """
-                self.send_response(200)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(html.encode())
+                rows = "".join([f"<div style='border:1px solid #444; padding:15px; margin:10px; border-radius:8px; background:#1e1e1e;'><h2 style='color:#00ffcc; margin-top:0;'>{p['name']}</h2><p style='color:#ccc;'>{p.get('description', 'Sin descripción')}</p><a href='{p['url']}' target='_blank' style='color:#3399ff; text-decoration:none;'>🔗 Abrir Proyecto</a></div>" for p in projects])
+                html = f"<html><head><title>Bozi-Bot Dashboard</title><meta name='viewport' content='width=device-width, initial-scale=1'><style>body{{font-family:sans-serif; background:#121212; color:white; padding:20px; max-width:800px; margin:auto;}}</style></head><body><h1 style='text-align:center;'>🏛️ Panel de Proyectos - Iván</h1><hr style='border:0; border-top:1px solid #333;'>{rows if rows else '<p>No hay proyectos cargados.</p>'}</body></html>"
+                self.send_response(200); self.send_header("Content-type", "text/html"); self.end_headers(); self.wfile.write(html.encode())
             except Exception as e:
-                self.send_response(500); self.end_headers()
-                self.wfile.write(f"Error: {e}".encode())
+                self.send_response(500); self.end_headers(); self.wfile.write(f"Error: {e}".encode())
         else:
-            self.send_response(200); self.end_headers()
-            self.wfile.write(b"Bozi-bot Online")
+            self.send_response(200); self.end_headers(); self.wfile.write(b"Bozi-bot Online")
 
 # ---------------------------------------------------
-# 🏛️ HELPERS DE DATOS
+# 🏛️ HELPERS & SEARCH
 # ---------------------------------------------------
 async def get_config(chat_id):
     try:
@@ -109,13 +81,9 @@ async def get_history(chat_id):
     except: return []
 
 async def safe_save(chat_id, role, content):
-    try:
-        supabase.table("bot_memory").insert({"chat_id": chat_id, "role": role, "content": content}).execute()
+    try: supabase.table("bot_memory").insert({"chat_id": chat_id, "role": role, "content": content}).execute()
     except: pass
 
-# ---------------------------------------------------
-# 🔍 WEB SEARCH (TAVILY)
-# ---------------------------------------------------
 async def search_web(query):
     try:
         url = "https://api.tavily.com/search"
@@ -123,11 +91,10 @@ async def search_web(query):
         response = requests.post(url, json=payload, timeout=10)
         results = response.json().get("results", [])
         return "\n".join([f"- {r['title']}: {r['url']}\n  {r['content'][:200]}..." for r in results])
-    except Exception as e:
-        logging.error(f"Error en Tavily: {e}"); return ""
+    except: return ""
 
 # ---------------------------------------------------
-# 📁 COMANDOS DE GESTIÓN
+# 📁 COMANDOS
 # ---------------------------------------------------
 async def cmd_add_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -135,11 +102,10 @@ async def cmd_add_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text or "|" not in text:
         await update.message.reply_text("Uso: /add_project Nombre | URL | Descripcion")
         return
-    parts = [p.strip() for p in text.split("|")]; name = parts[0]
-    url = parts[1] if len(parts) > 1 else ""; desc = parts[2] if len(parts) > 2 else ""
+    parts = [p.strip() for p in text.split("|")]
     try:
-        supabase.table("projects").insert({"chat_id": chat_id, "name": name, "url": url, "description": desc}).execute()
-        await update.message.reply_text(f"✅ Proyecto '{name}' guardado.")
+        supabase.table("projects").insert({"chat_id": chat_id, "name": parts[0], "url": parts[1], "description": parts[2] if len(parts)>2 else ""}).execute()
+        await update.message.reply_text(f"✅ Proyecto '{parts[0]}' guardado.")
     except Exception as e: await update.message.reply_text(f"❌ Error: {e}")
 
 async def cmd_edit_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -159,26 +125,25 @@ async def cmd_list_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not res.data: await update.message.reply_text("No hay proyectos cargados."); return
         msg = "📂 **Tus Proyectos:**\n\n"
         for p in res.data: 
-            msg += f"🔹 **{p['name']}**\n🔗 [Ver Dashboard](https://git-github-47x8.onrender.com/projects)\n🔗 [URL Directa]({p['url']})\n\n"
+            msg += f"🔹 **{p['name']}**\n🔗 [Dashboard](https://git-github-47x8.onrender.com/projects)\n🔗 [URL Directa]({p['url']})\n\n"
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e: await update.message.reply_text(f"❌ Error: {e}")
 
 # ---------------------------------------------------
-# 🧠 LÓGICA DE MENSAJES E IMÁGENES
+# 🧠 LÓGICA HÍBRIDA
 # ---------------------------------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
-    status = await update.message.reply_text("🧐 Analizando imagen con Visión GPT-4o-mini...")
+    status = await update.message.reply_text("🧐 Analizando con Visión GPT-4o-mini...")
     try:
         file = await update.message.photo[-1].get_file(); bytes_img = await file.download_as_bytearray()
         img64 = base64.b64encode(bytes_img).decode('utf-8')
-        prompt = update.message.caption or "Analizá esta imagen como experto en seguridad."
-        res = await openai_client.chat.completions.create(model=OPENAI_MODEL_NAME, messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img64}"}}]}], max_tokens=500)
+        res = await openai_client.chat.completions.create(model=OPENAI_MODEL_NAME, messages=[{"role": "user", "content": [{"type": "text", "text": "Analizá esto como experto en seguridad."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img64}"}}]}], max_tokens=500)
         ans = res.choices[0].message.content
         await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=ans)
-        await safe_save(chat_id, "user", f"[IMAGEN]: {prompt}"); await safe_save(chat_id, "assistant", ans)
-    except Exception as e: await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=f"Error: {e}")
+        await safe_save(chat_id, "assistant", ans)
+    except Exception as e: await update.message.reply_text(f"Error: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -186,27 +151,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
     status = await update.message.reply_text("...")
     try:
-        history = await get_history(chat_id)
-        config = await get_config(chat_id)
-        
+        history = await get_history(chat_id); config = await get_config(chat_id)
         needs_search = any(word in user_text.lower() for word in SEARCH_KEYWORDS)
-        web_context = ""
-        if needs_search:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text="🔍 Buscando en la web...")
-            web_context = await search_web(user_text)
-
+        web_context = await search_web(user_text) if needs_search else ""
         is_technical = any(word in user_text.lower() for word in TECH_KEYWORDS) or needs_search
-        pref = config.get("selected_model", "hybrid")
         
-        if pref == "openai" or is_technical:
-            client = openai_client; model = OPENAI_MODEL_NAME
-        else:
-            client = openrouter_client; model = OPENROUTER_MODEL_NAME
+        client = openai_client if (config.get("selected_model") == "openai" or is_technical) else openrouter_client
+        model = OPENAI_MODEL_NAME if (config.get("selected_model") == "openai" or is_technical) else OPENROUTER_MODEL_NAME
         
-        system = "Sos Bozi-bot, asistente experto de Iván."
-        if web_context: system += f"\nInformación web reciente: {web_context}"
-        
-        messages = [{"role": "system", "content": system}]
+        messages = [{"role": "system", "content": f"Sos Bozi-bot, asistente de Iván. Web: {web_context}"}]
         for h in history: messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": user_text})
 
@@ -217,28 +170,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e: await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=f"Error: {str(e)[:50]}")
 
 # ---------------------------------------------------
-# 🚀 BOOT
+# 🚀 BOOT (EMERGENCY FIX)
 # ---------------------------------------------------
-async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (f"⚙️ **Estado Real de Bozi-bot V3.3.1**\n\n👤 **Usuario:** Iván\n🧠 **Cerebro Superior:** OpenAI GPT-4o-mini\n🧠 **Cerebro Chat:** Mistral 7B (Free)\n\n"
-           f"🔗 [Abrir Panel de Proyectos](https://git-github-47x8.onrender.com/projects)")
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
 if __name__ == "__main__":
-    # Limpieza inicial de Webhook
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=True")
+    # Limpieza agresiva de Webhook (3 reintentos)
+    for i in range(3):
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=True")
+        time.sleep(1)
     
-    # Servidor Web en hilo separado
+    # Servidor Web
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), DashboardHandler).serve_forever(), daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🏛️ Bozi-bot V3.3.2 Reseteado.\nUsa /config.")))
+    app.add_handler(CommandHandler("config", lambda u, c: u.message.reply_text(f"⚙️ Bozi-bot Activo\n🔗 Dashboard: https://git-github-47x8.onrender.com/projects", parse_mode="Markdown")))
+    app.add_handler(CommandHandler("add_project", cmd_add_project))
+    app.add_handler(CommandHandler("edit_project", cmd_edit_project))
+    app.add_handler(CommandHandler("list_projects", cmd_list_projects))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    # ... tus handlers ...
-
-    logging.info("🚀 Bozi-bot V3.3.1 (Stable Dashboard) Iniciado")
-    
-    # AGREGÁ ESTO: Un pequeño respiro para que el proceso viejo muera del todo
-    import time
-    time.sleep(5) 
-    
+    logging.info("🚀 Bozi-bot V3.3.2 (Reset Mode) Iniciado. Esperando 10s para estabilizar...")
+    time.sleep(10) # Delay crucial para evitar Conflict 409
     app.run_polling(drop_pending_updates=True)
