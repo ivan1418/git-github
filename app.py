@@ -1,31 +1,25 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 3.3.2 (EMERGENCY RESET + STABLE POLLING)
+# Versión: 3.4 (SEMANTIC MEMORY + STABLE ROUTING)
 # ===================================================
 
 import os
-import re
-import json
 import logging
 import base64
-import asyncio 
 import requests
 import threading
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Telegram e IA
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, CallbackQueryHandler, filters
+from telegram import Update, constants
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
 from openai import AsyncOpenAI
 from supabase import create_client
 
 # ---------------------------------------------------
-# ⚙️ CONFIGURACIÓN
+# ⚙️ CONFIGURACIÓN Y CLIENTES
 # ---------------------------------------------------
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -34,162 +28,108 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-LOCAL_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+# Modelo estable para evitar el 404
+OPENROUTER_MODEL_NAME = "mistralai/mistral-7b-instruct:free"
 OPENAI_MODEL_NAME = "gpt-4o-mini"
-OPENROUTER_MODEL_NAME = "mistralai/mistral-7b-instruct:free" 
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 openrouter_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-TECH_KEYWORDS = ["error", "log", "configurá", "ataque", "hacker", "ip", "script", "codigo", "python", "sql", "vulnerabilidad"]
-SEARCH_KEYWORDS = ["noticias", "quien es", "hackeo reciente", "buscá", "investigá", "ultimo", "hoy"]
+TECH_KEYWORDS = ["error", "log", "configurá", "ataque", "hacker", "ip", "script", "python", "vulnerabilidad", "maestría", "ceupe"]
 
 # ---------------------------------------------------
-# 🌐 SERVIDOR WEB (DASHBOARD + HEALTH CHECKS)
+# 🧠 CEREBRO SEMÁNTICO (RAG)
 # ---------------------------------------------------
-class DashboardHandler(BaseHTTPRequestHandler):
-    def do_HEAD(self):
-        self.send_response(200); self.end_headers()
 
-    def do_GET(self):
-        if self.path == "/projects" or self.path == "/dashboard":
-            try:
-                res = supabase.table("projects").select("*").execute()
-                projects = res.data
-                rows = "".join([f"<div style='border:1px solid #444; padding:15px; margin:10px; border-radius:8px; background:#1e1e1e;'><h2 style='color:#00ffcc; margin-top:0;'>{p['name']}</h2><p style='color:#ccc;'>{p.get('description', 'Sin descripción')}</p><a href='{p['url']}' target='_blank' style='color:#3399ff; text-decoration:none;'>🔗 Abrir Proyecto</a></div>" for p in projects])
-                html = f"<html><head><title>Bozi-Bot Dashboard</title><meta name='viewport' content='width=device-width, initial-scale=1'><style>body{{font-family:sans-serif; background:#121212; color:white; padding:20px; max-width:800px; margin:auto;}}</style></head><body><h1 style='text-align:center;'>🏛️ Panel de Proyectos - Iván</h1><hr style='border:0; border-top:1px solid #333;'>{rows if rows else '<p>No hay proyectos cargados.</p>'}</body></html>"
-                self.send_response(200); self.send_header("Content-type", "text/html"); self.end_headers(); self.wfile.write(html.encode())
-            except Exception as e:
-                self.send_response(500); self.end_headers(); self.wfile.write(f"Error: {e}".encode())
-        else:
-            self.send_response(200); self.end_headers(); self.wfile.write(b"Bozi-bot Online")
-
-# ---------------------------------------------------
-# 🏛️ HELPERS & SEARCH
-# ---------------------------------------------------
-async def get_config(chat_id):
+async def get_embedding(text):
+    """Genera el vector para guardar en la memoria semántica"""
     try:
-        res = supabase.table("bot_config").select("*").eq("chat_id", chat_id).execute()
-        return res.data[0] if res.data else {}
-    except: return {}
+        res = await openai_client.embeddings.create(input=text, model="text-embedding-3-small")
+        return res.data[0].embedding
+    except: return None
 
-async def get_history(chat_id):
+async def search_memory(chat_id, query_text):
+    """Busca en la tabla bot_knowledge que creaste en Supabase"""
+    vector = await get_embedding(query_text)
+    if not vector: return ""
     try:
-        res = supabase.table("bot_memory").select("role, content").eq("chat_id", chat_id).order("created_at", desc=True).limit(20).execute()
-        return list(reversed(res.data)) if res.data else []
-    except: return []
-
-async def safe_save(chat_id, role, content):
-    try: supabase.table("bot_memory").insert({"chat_id": chat_id, "role": role, "content": content}).execute()
-    except: pass
-
-async def search_web(query):
-    try:
-        url = "https://api.tavily.com/search"
-        payload = {"api_key": TAVILY_API_KEY, "query": query, "search_depth": "advanced", "max_results": 3}
-        response = requests.post(url, json=payload, timeout=10)
-        results = response.json().get("results", [])
-        return "\n".join([f"- {r['title']}: {r['url']}\n  {r['content'][:200]}..." for r in results])
+        res = supabase.rpc("match_knowledge", {
+            "query_embedding": vector,
+            "match_threshold": 0.5,
+            "match_count": 3,
+            "p_chat_id": chat_id
+        }).execute()
+        if res.data:
+            return "\n\n💡 [MEMORIA DEL SISTEMA]:\n" + "\n".join([d['content'] for d in res.data])
+        return ""
     except: return ""
 
-# ---------------------------------------------------
-# 📁 COMANDOS
-# ---------------------------------------------------
-async def cmd_add_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = " ".join(context.args)
-    if not text or "|" not in text:
-        await update.message.reply_text("Uso: /add_project Nombre | URL | Descripcion")
-        return
-    parts = [p.strip() for p in text.split("|")]
-    try:
-        supabase.table("projects").insert({"chat_id": chat_id, "name": parts[0], "url": parts[1], "description": parts[2] if len(parts)>2 else ""}).execute()
-        await update.message.reply_text(f"✅ Proyecto '{parts[0]}' guardado.")
-    except Exception as e: await update.message.reply_text(f"❌ Error: {e}")
-
-async def cmd_edit_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = " ".join(context.args)
-    if not text or "|" not in text:
-        await update.message.reply_text("Uso: /edit_project NombreActual | NuevoNombre | NuevaURL")
-        return
-    parts = [p.strip() for p in text.split("|")]
-    try:
-        supabase.table("projects").update({"name": parts[1], "url": parts[2]}).eq("name", parts[0]).execute()
-        await update.message.reply_text(f"✅ Proyecto '{parts[0]}' actualizado.")
-    except Exception as e: await update.message.reply_text(f"❌ Error: {e}")
-
-async def cmd_list_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        res = supabase.table("projects").select("*").eq("chat_id", update.effective_chat.id).execute()
-        if not res.data: await update.message.reply_text("No hay proyectos cargados."); return
-        msg = "📂 **Tus Proyectos:**\n\n"
-        for p in res.data: 
-            msg += f"🔹 **{p['name']}**\n🔗 [Dashboard](https://git-github-47x8.onrender.com/projects)\n🔗 [URL Directa]({p['url']})\n\n"
-        await update.message.reply_text(msg, parse_mode="Markdown")
-    except Exception as e: await update.message.reply_text(f"❌ Error: {e}")
+async def save_to_memory(chat_id, text):
+    """Guarda info técnica importante automáticamente"""
+    vector = await get_embedding(text)
+    if vector:
+        try:
+            supabase.table("bot_knowledge").insert({
+                "chat_id": chat_id, "content": text, "embedding": vector
+            }).execute()
+        except: pass
 
 # ---------------------------------------------------
-# 🧠 LÓGICA HÍBRIDA
+# 🌐 DASHBOARD Y HANDLERS (Igual a V3.3.2)
 # ---------------------------------------------------
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
-    status = await update.message.reply_text("🧐 Analizando con Visión GPT-4o-mini...")
-    try:
-        file = await update.message.photo[-1].get_file(); bytes_img = await file.download_as_bytearray()
-        img64 = base64.b64encode(bytes_img).decode('utf-8')
-        res = await openai_client.chat.completions.create(model=OPENAI_MODEL_NAME, messages=[{"role": "user", "content": [{"type": "text", "text": "Analizá esto como experto en seguridad."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img64}"}}]}], max_tokens=500)
-        ans = res.choices[0].message.content
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=ans)
-        await safe_save(chat_id, "assistant", ans)
-    except Exception as e: await update.message.reply_text(f"Error: {e}")
+class DashboardHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self): self.send_response(200); self.end_headers()
+    def do_GET(self):
+        if self.path in ["/projects", "/dashboard"]:
+            try:
+                res = supabase.table("projects").select("*").execute()
+                rows = "".join([f"<div style='border:1px solid #444; padding:15px; margin:10px; border-radius:8px; background:#1e1e1e;'><h2 style='color:#00ffcc; margin-top:0;'>{p['name']}</h2><p style='color:#ccc;'>{p['url']}</p></div>" for p in res.data])
+                html = f"<html><body style='background:#121212; color:white; font-family:sans-serif; padding:20px;'><h1>🏛️ Panel de Iván</h1>{rows}</body></html>"
+                self.send_response(200); self.send_header("Content-type", "text/html"); self.end_headers(); self.wfile.write(html.encode())
+            except: self.send_response(500); self.end_headers()
+        else: self.send_response(200); self.end_headers(); self.wfile.write(b"Online")
 
+# ---------------------------------------------------
+# 🤖 LÓGICA DE MENSAJES
+# ---------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_text = update.message.text or ""
+    user_text = update.message.text
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
-    status = await update.message.reply_text("...")
+    
+    # 1. Buscar en la memoria semántica
+    memoria = await search_memory(chat_id, user_text)
+    
+    # 2. Decidir modelo (Híbrido)
+    is_tech = any(w in user_text.lower() for w in TECH_KEYWORDS)
+    client = openai_client if is_tech else openrouter_client
+    model = OPENAI_MODEL_NAME if is_tech else OPENROUTER_MODEL_NAME
+    
     try:
-        history = await get_history(chat_id); config = await get_config(chat_id)
-        needs_search = any(word in user_text.lower() for word in SEARCH_KEYWORDS)
-        web_context = await search_web(user_text) if needs_search else ""
-        is_technical = any(word in user_text.lower() for word in TECH_KEYWORDS) or needs_search
-        
-        client = openai_client if (config.get("selected_model") == "openai" or is_technical) else openrouter_client
-        model = OPENAI_MODEL_NAME if (config.get("selected_model") == "openai" or is_technical) else OPENROUTER_MODEL_NAME
-        
-        messages = [{"role": "system", "content": f"Sos Bozi-bot, asistente de Iván. Web: {web_context}"}]
-        for h in history: messages.append({"role": h["role"], "content": h["content"]})
-        messages.append({"role": "user", "content": user_text})
-
-        res = await client.chat.completions.create(model=model, messages=messages, temperature=0.7)
+        messages = [{"role": "system", "content": f"Sos Bozi-bot. {memoria}"}, {"role": "user", "content": user_text}]
+        res = await client.chat.completions.create(model=model, messages=messages)
         ans = res.choices[0].message.content
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=ans)
-        await safe_save(chat_id, "user", user_text); await safe_save(chat_id, "assistant", ans)
-    except Exception as e: await context.bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=f"Error: {str(e)[:50]}")
+        await update.message.reply_text(ans)
+        
+        # 3. Si es técnico, guardar en la memoria semántica para el futuro
+        if is_tech:
+            await save_to_memory(chat_id, f"Iván preguntó: {user_text}. Respuesta: {ans}")
+            
+    except Exception as e:
+        await update.message.reply_text(f"Error: {str(e)[:50]}")
 
 # ---------------------------------------------------
-# 🚀 BOOT (EMERGENCY FIX)
+# 🚀 INICIO
 # ---------------------------------------------------
 if __name__ == "__main__":
-    # Limpieza agresiva de Webhook (3 reintentos)
-    for i in range(3):
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=True")
-        time.sleep(1)
+    for i in range(2): requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=True")
     
-    # Servidor Web
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), DashboardHandler).serve_forever(), daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🏛️ Bozi-bot V3.3.2 Reseteado.\nUsa /config.")))
-    app.add_handler(CommandHandler("config", lambda u, c: u.message.reply_text(f"⚙️ Bozi-bot Activo\n🔗 Dashboard: https://git-github-47x8.onrender.com/projects", parse_mode="Markdown")))
-    app.add_handler(CommandHandler("add_project", cmd_add_project))
-    app.add_handler(CommandHandler("edit_project", cmd_edit_project))
-    app.add_handler(CommandHandler("list_projects", cmd_list_projects))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    logging.info("🚀 Bozi-bot V3.3.2 (Reset Mode) Iniciado. Esperando 10s para estabilizar...")
-    time.sleep(10) # Delay crucial para evitar Conflict 409
+    logging.info("🚀 Bozi-bot V3.4 (Semantic Memory) Iniciado")
+    time.sleep(10)
     app.run_polling(drop_pending_updates=True)
