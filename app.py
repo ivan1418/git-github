@@ -73,17 +73,27 @@ async def get_best_free_model():
     except: return "mistralai/mistral-7b-instruct-v0.1"
 
 async def search_memory(chat_id, query):
-    """Búsqueda semántica en Supabase"""
+    """Búsqueda semántica corregida para evitar el error 400"""
     try:
+        # 1. Generar el embedding
         res_emb = await openai_client.embeddings.create(input=query, model="text-embedding-3-small")
         vector = res_emb.data[0].embedding
+        
+        # 2. Llamada a Supabase (Asegurate que los nombres coincidan con el SQL que corrimos)
         res = supabase.rpc("match_knowledge", {
-            "query_embedding": vector, "match_threshold": 0.5, "match_count": 2, "p_chat_id": chat_id
+            "query_embedding": vector,
+            "match_threshold": 0.5,
+            "match_count": 2,
+            "p_chat_id": chat_id  # <--- Este es el sospechoso del error 400
         }).execute()
+        
         if res.data:
+            logging.info(f"✅ Memoria recuperada para el chat {chat_id}")
             return "\n\n💡 [MEMORIA PERSISTENTE]:\n" + "\n".join([d['content'] for d in res.data])
         return ""
-    except: return ""
+    except Exception as e:
+        logging.error(f"❌ Error en RPC match_knowledge: {e}")
+        return ""
 
 # ---------------------------------------------------
 # 🤖 LÓGICA DE PROCESAMIENTO
