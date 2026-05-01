@@ -1,6 +1,6 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 5.18 (SYNTAX FIX + ROBUST MESH IA)
+# Versión: 5.19 (ATOMIC RESILIENCE + FORCED FALLBACK)
 # ===================================================
 
 import os, logging, json, requests, threading, time, asyncio
@@ -36,57 +36,41 @@ MODEL_LOW = "meta-llama/llama-3.1-8b-instruct:free"
 MODEL_BACKUP = "google/gemini-flash-1.5-exp"
 
 # ---------------------------------------------------
-# 🧠 PERSISTENCIA Y MEMORIA
+# 🤖 MALLA DE IA ULTRA RESILIENTE (FIXED)
 # ---------------------------------------------------
 
-async def get_config(chat_id):
-    try:
-        res = supabase.table("user_config").select("*").eq("chat_id", int(chat_id)).execute()
-        return res.data[0] if res.data else {"model": MODEL_HIGH, "lang": "Rosario/Voseo"}
-    except: return {"model": MODEL_HIGH, "lang": "Rosario/Voseo"}
-
-async def save_interaction_to_memory(chat_id, user_text, bot_response):
-    try:
-        if openai_client:
-            res_emb = await openai_client.embeddings.create(input=f"Iván: {user_text}\nBot: {bot_response}", model="text-embedding-3-small")
-            supabase.table("bot_knowledge").insert({"chat_id": int(chat_id), "content": f"Iván: {user_text}\nBot: {bot_response}", "embedding": res_emb.data[0].embedding}).execute()
-    except: pass
-
-async def get_semantic_memory(chat_id, query):
-    if not openai_client: return ""
-    try:
-        res_emb = await openai_client.embeddings.create(input=query, model="text-embedding-3-small")
-        res = supabase.rpc("match_knowledge", {"query_embedding": res_emb.data[0].embedding, "match_threshold": 0.5, "match_count": 2, "p_chat_id": int(chat_id)}).execute()
-        return "\n\n💡 [MEMORIA]:\n" + "\n".join([d['content'] for d in res.data]) if res.data else ""
-    except: return ""
-
-# ---------------------------------------------------
-# 🤖 MALLA DE IA CON TRIPLE REINTENTO (FIXED)
-# ---------------------------------------------------
-
-async def call_ai_with_extreme_fallback(messages, complexity, preferred_model):
+async def call_ai_logic(messages, complexity, preferred_model):
+    """Malla Triple: Intenta según complejidad con timeouts estrictos."""
     queue = []
     if complexity == "high":
-        if openai_client: queue.append((openai_client, preferred_model, False))
-        if openrouter_client: queue.append((openrouter_client, MODEL_LOW, False))
+        if openai_client: queue.append((openai_client, preferred_model, "OpenAI-Primary"))
+        if openrouter_client: queue.append((openrouter_client, MODEL_LOW, "OpenRouter-Low"))
     else:
-        if openrouter_client: queue.append((openrouter_client, MODEL_LOW, False))
-        if openai_client: queue.append((openai_client, preferred_model, False))
+        if openrouter_client: queue.append((openrouter_client, MODEL_LOW, "OpenRouter-Primary"))
+        if openai_client: queue.append((openai_client, preferred_model, "OpenAI-High"))
     
-    if openrouter_client: queue.append((openrouter_client, MODEL_BACKUP, True))
+    # Backup terciario siempre al final
+    if openrouter_client: queue.append((openrouter_client, MODEL_BACKUP, "Backup-Terciario"))
 
-    for client, model, is_backup in queue:
+    for client, model, label in queue:
         try:
-            res = await client.chat.completions.create(model=model, messages=messages, max_tokens=800, timeout=15)
+            logging.info(f"Intentando con {label} ({model})...")
+            res = await asyncio.wait_for(
+                client.chat.completions.create(model=model, messages=messages, max_tokens=800),
+                timeout=12.0 # Timeout de 12 segundos para no colgar el bot
+            )
             content = res.choices[0].message.content
-            if content and len(content.strip()) > 2:
-                prefix = "⚠️ [Modo Backup Activo]: " if is_backup else ""
+            if content and len(content.strip()) > 1:
+                prefix = "⚠️ [Modo Backup]: " if "Backup" in label else ""
                 return f"{prefix}{content}", model
-        except: continue
-    return "❌ Error crítico en la malla de IA.", "none"
+        except Exception as e:
+            logging.error(f"Falla en {label}: {e}")
+            continue
+    
+    return "❌ Lo siento Iván, los servicios de IA están saturados. Reintentá en un momento.", "none"
 
 # ---------------------------------------------------
-# 🚀 ROUTER Y HANDLERS
+# 🚀 ORQUESTADOR Y HANDLERS
 # ---------------------------------------------------
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,62 +78,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     if not user_text: return
     if chat_id not in CHAT_HISTORY: CHAT_HISTORY[chat_id] = []
+    
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
 
-    # Router Rápido
-    try:
-        res_r = await openai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": f"Usuario: {user_text}. JSON: {{'intent': 'task|project|publish|chat', 'complexity': 'high|low'}}"}], response_format={"type": "json_object"})
-        intent_data = json.loads(res_r.choices[0].message.content)
-    except: intent_data = {"intent": "chat", "complexity": "low"}
+    # Determinación de complejidad rápida (basada en keywords para no bloquear)
+    complexity = "low"
+    tech_keywords = ["program", "code", "cyber", "seguridad", "api", "fix", "error", "script", "hacker"]
+    if any(k in user_text.lower() for k in tech_keywords):
+        complexity = "high"
 
-    memoria = await get_semantic_memory(chat_id, user_text)
-    conf = await get_config(chat_id)
-    messages = [{"role": "system", "content": f"Socio IT Rosario. {memoria}"}]
-    messages.extend(CHAT_HISTORY[chat_id][-8:]); messages.append({"role": "user", "content": user_text})
+    # Preparar mensajes
+    messages = [{"role": "system", "content": "Socio IT Rosario. Natural y directo."}]
+    messages.extend(CHAT_HISTORY[chat_id][-6:])
+    messages.append({"role": "user", "content": user_text})
 
-    bot_response, used_model = await call_ai_with_extreme_fallback(messages, intent_data['complexity'], conf['model'])
+    # Llamada a la IA con la malla de fallback
+    bot_response, used_model = await call_ai_logic(messages, complexity, MODEL_HIGH)
+    
+    # Enviar respuesta
     tag = f"\n\n⚡ [{used_model.split('/')[-1]}]" if DEBUG_MODE.get(chat_id) else ""
     await update.message.reply_text(f"{bot_response}{tag}")
     
-    CHAT_HISTORY[chat_id].append({"role": "user", "content": user_text}); CHAT_HISTORY[chat_id].append({"role": "assistant", "content": bot_response})
-    if intent_data['intent'] != "chat": asyncio.create_task(execute_smart_action(chat_id, intent_data, context.bot, user_text))
-    asyncio.create_task(save_interaction_to_memory(chat_id, user_text, bot_response))
+    # Actualizar historial
+    CHAT_HISTORY[chat_id].append({"role": "user", "content": user_text})
+    CHAT_HISTORY[chat_id].append({"role": "assistant", "content": bot_response})
+    if len(CHAT_HISTORY[chat_id]) > 10: CHAT_HISTORY[chat_id] = CHAT_HISTORY[chat_id][-10:]
 
-async def execute_smart_action(chat_id, intent_data, bot, original_text):
-    intent = intent_data.get('intent')
-    try:
-        if intent == "publish":
-            res_draft = supabase.table("projects").select("*").eq("chat_id", int(chat_id)).eq("status", "draft").execute()
-            if res_draft.data:
-                res_ia = await openai_client.chat.completions.create(model=MODEL_HIGH, messages=[{"role": "system", "content": "HTML5. SOLO código."}, {"role": "user", "content": res_draft.data[0]['content']}])
-                # LÍNEA 191 CORREGIDA: Sin saltos de línea ni caracteres ocultos
-                html = res_ia.choices[0].message.content.replace("```html", "").replace("```", "").strip()
-                supabase.table("projects").update({"content": html, "status": "published"}).eq("id", res_draft.data[0]['id']).execute()
-                await bot.send_message(chat_id, f"🚀 Publicado en: {os.getenv('RENDER_EXTERNAL_URL')}/view/{res_draft.data[0]['id']}")
-    except: pass
-
-async def handle_photo(update, context):
-    photo = await update.message.photo[-1].get_file()
-    res = await openai_client.chat.completions.create(model=MODEL_HIGH, messages=[{"role": "user", "content": [{"type": "text", "text": "Analizá técnicamente."}, {"type": "image_url", "image_url": {"url": photo.file_path}}]}] )
-    await update.message.reply_text(f"👁️ Análisis:\n\n{res.choices[0].message.content}")
-
-async def start_cmd(update, context): await update.message.reply_text("🏛️ Bozi-bot V5.18 Online.")
-async def status_cmd(update, context): await update.message.reply_text(f"🖥️ Online | Rosario: {datetime.now(ARG_TZ).strftime('%H:%M:%S')}")
+async def start_cmd(update, context): await update.message.reply_text("🏛️ Bozi-bot V5.19 Operativo.")
+async def status_cmd(update, context): await update.message.reply_text(f"🖥️ Online | {datetime.now(ARG_TZ).strftime('%H:%M:%S')}")
+async def debug_cmd(update, context):
+    DEBUG_MODE[update.effective_chat.id] = not DEBUG_MODE.get(update.effective_chat.id, False)
+    await update.message.reply_text(f"🛠️ Debug: {'ON' if DEBUG_MODE[update.effective_chat.id] else 'OFF'}")
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path.startswith("/view/"):
-            p_id = self.path.split("/")[-1]
-            res = supabase.table("projects").select("content").eq("id", p_id).execute()
-            if res.data:
-                self.send_response(200); self.send_header("Content-type", "text/html"); self.end_headers()
-                self.wfile.write(res.data[0]['content'].encode()); return
-        self.send_response(200); self.end_headers(); self.wfile.write(b"Bozi-bot V5.18 Live")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"Bozi-bot V5.19 Live")
 
 if __name__ == "__main__":
+    # Limpiar Webhook
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=True")
+    
+    # Server para Render
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), DashboardHandler).serve_forever(), daemon=True).start()
+    
+    # App
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_cmd)); app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("debug", debug_cmd))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo)); app.run_polling()
+    
+    logging.info("Bot en marcha...")
+    app.run_polling()
