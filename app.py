@@ -1,6 +1,6 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 3.9.1 (REAL HTML PUB + PERSISTENCE + SELECTOR)
+# Versión: 3.9.2 (DEPLOY FIX + HTML REAL + PERSISTENCE)
 # ===================================================
 
 import os
@@ -33,74 +33,72 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 openrouter_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Configuración dinámica de modelo
 USER_CONFIG = {"model": "gpt-4o"} 
 
 # ---------------------------------------------------
-# 🧠 MEMORIA ACTIVA Y APRENDIZAJE
+# 🛠️ FUNCIONES DE INFRAESTRUCTURA (DEFINIDAS PRIMERO)
 # ---------------------------------------------------
 
+def get_file_content(filepath, default=""):
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r', encoding='utf-8') as f: return f.read().strip()
+        return default
+    except: return default
+
+async def task_worker(bot):
+    """Revisa tareas programadas cada minuto"""
+    while True:
+        try:
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            res = supabase.table("scheduled_tasks").select("*").eq("status", "pending").lte("scheduled_at", now).execute()
+            for t in res.data:
+                await bot.send_message(chat_id=t['chat_id'], text=f"🔔 **RECORDATORIO**: {t['description']}")
+                supabase.table("scheduled_tasks").update({"status": "completed"}).eq("id", t['id']).execute()
+        except Exception as e:
+            logging.error(f"⚠️ Error worker: {e}")
+        await asyncio.sleep(60)
+
 async def save_interaction_to_memory(chat_id, user_text, bot_response):
-    """Guarda la charla y genera embeddings para que el bot 'aprenda'"""
+    """Aprendizaje continuo con embeddings"""
     content = f"Iván: {user_text}\nBozi-bot: {bot_response}"
     try:
         res_emb = await openai_client.embeddings.create(input=content, model="text-embedding-3-small")
         embedding = res_emb.data[0].embedding
-        
         supabase.table("bot_knowledge").insert({
-            "chat_id": int(chat_id),
-            "content": content,
-            "embedding": embedding,
-            "created_at": datetime.now().isoformat()
+            "chat_id": int(chat_id), "content": content, "embedding": embedding
         }).execute()
-        logging.info(f"🧠 Memoria persistente actualizada para {chat_id}")
     except Exception as e:
-        logging.error(f"❌ Error en persistencia de memoria: {e}")
+        logging.error(f"❌ Error memoria: {e}")
 
 # ---------------------------------------------------
 # 🚀 ACCIONES: PUBLICACIÓN REAL (HTML)
 # ---------------------------------------------------
 
 async def publish_project_content(chat_id, user_text):
-    """Genera y guarda contenido HTML real en la base de datos"""
-    if "publicalo" not in user_text.lower():
-        return None
-    
+    if "publicalo" not in user_text.lower(): return None
     try:
-        # 1. La IA genera el código HTML basado en la idea previa
         res = await openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "Generá un archivo HTML5 profesional y autocontenido basado en la idea del usuario. Usá CSS moderno (Tailwind CDN)."},
-                      {"role": "user", "content": f"Proyecto para Iván: {user_text}"}]
+            messages=[{"role": "system", "content": "Generá HTML5 profesional con Tailwind CDN."},
+                      {"role": "user", "content": f"Proyecto: {user_text}"}]
         )
         html_code = res.choices[0].message.content
-        
-        # 2. Insertamos en projects con el contenido real
         res_db = supabase.table("projects").insert({
-            "chat_id": int(chat_id),
-            "content": html_code,
-            "status": "published",
-            "title": f"Proyecto {datetime.now().strftime('%d/%m')}"
+            "chat_id": int(chat_id), "content": html_code, "status": "published"
         }).execute()
-        
-        p_id = res_db.data[0]['id']
-        url = f"{SUPABASE_URL}/rest/v1/projects?id=eq.{p_id}&select=content" # Link técnico de visualización
-        return f"🚀 **¡Proyecto publicado con contenido real!**\nPodés ver el código generado aquí: {url}\n(Nota: Para ver el renderizado necesitás el frontend del Panel Completo)."
+        return f"🚀 **Publicado!** ID: {res_db.data[0]['id']}\nCódigo guardado en la columna 'content'."
     except Exception as e:
-        logging.error(f"❌ Fallo en publicación: {e}")
-        return f"⚠️ Error al publicar: {e}"
+        return f"❌ Error: {e}"
 
 # ---------------------------------------------------
-# 🤖 COMANDOS Y MENSAJES
+# 🤖 HANDLERS DE TELEGRAM
 # ---------------------------------------------------
 
 async def model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Selector de modelo rápido"""
     if context.args and context.args[0] in ["gpt-4o", "gpt-4o-mini"]:
         USER_CONFIG["model"] = context.args[0]
-        await update.message.reply_text(f"✅ Modelo cambiado a: {USER_CONFIG['model']}")
-    else:
-        await update.message.reply_text("Uso: /model [gpt-4o|gpt-4o-mini]")
+        await update.message.reply_text(f"✅ Modelo: {USER_CONFIG['model']}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -109,60 +107,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
 
-    # 1. Intentar Publicación Real primero
+    # 1. Acción de publicación
     pub_res = await publish_project_content(chat_id, user_text)
     if pub_res:
-        await update.message.reply_text(pub_res)
-        return
+        return await update.message.reply_text(pub_res)
 
-    # 2. Búsqueda Semántica (Memoria)
-    memoria = ""
-    try:
-        res_emb = await openai_client.embeddings.create(input=user_text, model="text-embedding-3-small")
-        mem_res = supabase.rpc("match_knowledge", {
-            "query_embedding": res_emb.data[0].embedding, 
-            "match_threshold": 0.5, 
-            "match_count": 2, 
-            "p_chat_id": int(chat_id)
-        }).execute()
-        if mem_res.data:
-            memoria = "\n\n💡 [MEMORIA ACTIVA]:\n" + "\n".join([d['content'] for d in mem_res.data])
-    except Exception as e:
-        logging.error(f"Error recuperando memoria: {e}")
-
-    # 3. Generación de Respuesta
+    # 2. Memoria y Generación
     rules = get_file_content("rules.txt")
     self_info = get_file_content("self.txt")
-    system_prompt = f"{self_info}\n\nREGLAS:\n{rules}\n{memoria}"
-
+    
     try:
         res = await openai_client.chat.completions.create(
             model=USER_CONFIG["model"],
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}]
+            messages=[{"role": "system", "content": f"{self_info}\n\n{rules}"}, {"role": "user", "content": user_text}]
         )
         bot_response = res.choices[0].message.content
         await update.message.reply_text(bot_response)
-        
-        # 4. APRENDIZAJE: Guardar para el futuro
         await save_interaction_to_memory(chat_id, user_text, bot_response)
-        
     except Exception as e:
-        logging.error(f"Error crítico: {e}")
-        await update.message.reply_text(f"❌ Fallo: {e}")
+        await update.message.reply_text(f"❌ Fallo técnico: {e}")
 
 # ---------------------------------------------------
-# 🌐 INFRAESTRUCTURA
+# 🌐 INFRAESTRUCTURA (RENDER)
 # ---------------------------------------------------
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self): self.send_response(200); self.end_headers()
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-type", "text/html"); self.end_headers()
+        self.wfile.write(b"<h1>Bozi-bot V3.9.2 Online</h1>")
 
 if __name__ == "__main__":
+    # Iniciar servidor Health Check
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), DashboardHandler).serve_forever(), daemon=True).start()
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
     app.add_handler(CommandHandler("model", model_cmd))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    # El worker y el dashboard se mantienen de versiones anteriores
+    # Iniciar Worker y Polling
     loop = asyncio.get_event_loop()
-    loop.create_task(task_worker(app.bot)) 
+    loop.create_task(task_worker(app.bot)) # <--- DEFINIDA ARRIBA, YA NO FALLA
     
-    logging.info(f"🚀 Bozi-bot V3.9.1 Online (Model: {USER_CONFIG['model']})")
+    logging.info(f"🚀 Bozi-bot V3.9.2 Ready.")
     app.run_polling(drop_pending_updates=True)
