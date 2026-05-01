@@ -1,6 +1,6 @@
 # ===================================================
 # 🏛️ BOZI-BOT: EL CEREBRO HÍBRIDO ASINCRÓNICO DE ELITE
-# Versión: 3.5.5 (MEMORY FIX + WEB SEARCH + SCHEDULER)
+# Versión: 3.5.6 (HEALTH-CHECK + SCHEDULER + WEB SEARCH)
 # ===================================================
 
 import os
@@ -58,7 +58,6 @@ def get_file_content(filepath, default=""):
         return default
 
 def web_search(query):
-    """Búsqueda web activa para complementar el conocimiento"""
     if not TAVILY_API_KEY: return ""
     try:
         url = "https://api.tavily.com/search"
@@ -69,16 +68,14 @@ def web_search(query):
     except: return ""
 
 # ---------------------------------------------------
-# 🧠 MEMORIA SEMÁNTICA (FIXED)
+# 🧠 MEMORIA SEMÁNTICA
 # ---------------------------------------------------
 
 async def search_memory(chat_id, query):
-    """Fix definitivo para el error 400 mediante casteo de chat_id"""
     try:
         res_emb = await openai_client.embeddings.create(input=query, model="text-embedding-3-small")
         vector = res_emb.data[0].embedding
         
-        # El casteo int(chat_id) asegura compatibilidad con bigint en Supabase
         res = supabase.rpc("match_knowledge", {
             "query_embedding": vector,
             "match_threshold": 0.5,
@@ -87,11 +84,11 @@ async def search_memory(chat_id, query):
         }).execute()
         
         if res.data:
-            logging.info(f"✅ Memoria recuperada para el chat {chat_id}")
+            logging.info(f"✅ Memoria recuperada para {chat_id}")
             return "\n\n💡 [MEMORIA PERSISTENTE]:\n" + "\n".join([d['content'] for d in res.data])
         return ""
     except Exception as e:
-        logging.error(f"❌ Error en RPC match_knowledge: {e}")
+        logging.error(f"❌ Error en memoria: {e}")
         return ""
 
 # ---------------------------------------------------
@@ -99,10 +96,10 @@ async def search_memory(chat_id, query):
 # ---------------------------------------------------
 
 async def task_worker(bot):
-    """Revisa tareas programadas cada minuto"""
     while True:
         try:
             now = time.strftime('%Y-%m-%d %H:%M:%S')
+            # Requiere columna 'scheduled_at' y 'status' en la tabla 'scheduled_tasks'
             res = supabase.table("scheduled_tasks").select("*").eq("status", "pending").lte("scheduled_at", now).execute()
             
             for task in res.data:
@@ -124,14 +121,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
     
-    # Carga de archivos y memoria
     rules = get_file_content("rules.txt")
     self_info = get_file_content("self.txt")
     memoria = await search_memory(chat_id, user_text)
     
-    # Búsqueda web automática si es algo técnico o pregunta por actualidad
     web_info = ""
-    if any(k in user_text.lower() for k in ["noticia", "vulnerabilidad", "nuevo", "actual"]):
+    if any(k in user_text.lower() for k in ["noticia", "vulnerabilidad", "nuevo", "actual", "quién es"]):
         web_info = web_search(user_text)
 
     system_prompt = (
@@ -166,24 +161,33 @@ async def process_with_model(update, system, user, client, model_name, temp=0.7)
         return False
 
 # ---------------------------------------------------
-# 🌐 INFRAESTRUCTURA
+# 🌐 INFRAESTRUCTURA (RENDER COMPLIANT)
 # ---------------------------------------------------
 
 class DashboardHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        """Responde a los pings de Render para el Health Check"""
+        self.send_response(200)
+        self.end_headers()
+
     def do_GET(self):
-        self.send_response(200); self.end_headers()
-        self.wfile.write(b"Bozi-bot V3.5.5 Online")
+        """Responde a las visitas por navegador"""
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"Bozi-bot V3.5.6 Online - Health Check OK")
 
 if __name__ == "__main__":
     for _ in range(2): requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=True")
+    
+    # Servidor web para el Health Check de Render
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), DashboardHandler).serve_forever(), daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    # Lanzar Scheduler de tareas
     loop = asyncio.get_event_loop()
     loop.create_task(task_worker(app.bot))
     
-    logging.info("🚀 Bozi-bot V3.5.5 Iniciado.")
+    logging.info("🚀 Bozi-bot V3.5.6 Iniciado.")
     app.run_polling(drop_pending_updates=True)
