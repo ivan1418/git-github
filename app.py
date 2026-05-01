@@ -35,7 +35,7 @@ DEBUG_MODE = {}
 
 MODEL_HIGH = os.getenv("MODEL_HIGH", "gpt-4o")
 MODEL_LOW = "meta-llama/llama-3.1-8b-instruct:free"
-MODEL_BACKUP = "google/gemini-flash-1.5-exp"
+MODEL_BACKUP = "mistralai/mistral-7b-instruct"
 
 # ---------------------------------------------------
 # 🧠 PERSISTENCIA Y MEMORIA
