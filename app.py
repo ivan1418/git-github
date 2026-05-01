@@ -41,7 +41,7 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 openrouter_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-TECH_KEYWORDS = ["error", "log", "configurá", "ataque", "hacker", "ip", "script", "python", "vulnerabilidad", "maestría", "ceupe", "lumu", "nmap", "flipper", "proxmark"]
+TECH_KEYWORDS = ["error", "log", "configurá", "ataque", "hacker", "ip", "script", "python", "vulnerabilidad", "wazuh", "proyecto", "tarea", "nmap", "flipper", "proxmark"]
 
 # ---------------------------------------------------
 # 📁 GESTIÓN DE ARCHIVOS DE CONFIGURACIÓN (.TXT)
